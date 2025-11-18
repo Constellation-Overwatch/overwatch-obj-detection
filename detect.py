@@ -15,6 +15,7 @@ import uuid
 import subprocess
 import os
 import argparse
+import glob
 from dotenv import load_dotenv
 
 # Global NATS connection and JetStream context
@@ -315,20 +316,111 @@ def signal_handler(signum, frame):
     asyncio.create_task(cleanup())
     sys.exit(0)
 
+def enumerate_video_devices(verbose=False):
+    """Enumerate available video capture devices"""
+    devices = []
+
+    # Suppress OpenCV warnings during enumeration
+    if not verbose:
+        cv2.setLogLevel(0)  # Suppress all OpenCV logging
+
+    # Try indices 0-9
+    for index in range(10):
+        cap = cv2.VideoCapture(index)
+        if cap.isOpened():
+            # Get device info
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = int(cap.get(cv2.CAP_PROP_FPS))
+            backend = cap.getBackendName()
+
+            # Determine if this is a built-in camera
+            is_native = (platform.system() == 'Darwin' and index == 0 and backend == 'AVFOUNDATION')
+
+            devices.append({
+                'index': index,
+                'type': 'local_camera',
+                'resolution': f"{width}x{height}",
+                'fps': fps,
+                'backend': backend,
+                'is_native': is_native,
+                'name': 'FaceTime HD Camera (Built-in)' if is_native else f'Camera {index}'
+            })
+            cap.release()
+
+    # On Linux, also check /dev/video* devices
+    if platform.system() == 'Linux':
+        video_devs = glob.glob('/dev/video*')
+        for dev in video_devs:
+            try:
+                cap = cv2.VideoCapture(dev)
+                if cap.isOpened():
+                    devices.append({
+                        'path': dev,
+                        'type': 'v4l2_device',
+                        'backend': 'V4L2',
+                        'is_native': False,
+                        'name': dev
+                    })
+                    cap.release()
+            except:
+                pass
+
+    # Re-enable OpenCV logging
+    if not verbose:
+        cv2.setLogLevel(3)  # Restore to ERROR level
+
+    return devices
+
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='Constellation ISR Object Detection Client')
+
+    # Video source options
+    source_group = parser.add_mutually_exclusive_group()
+    source_group.add_argument('--list-devices', action='store_true',
+                             help='List available video devices and exit')
+    source_group.add_argument('--camera', type=int, default=None,
+                             help='Camera device index (e.g., 0, 1, 2)')
+    source_group.add_argument('--device', type=str, default=None,
+                             help='Device path (e.g., /dev/video4)')
+    source_group.add_argument('--rtsp', type=str, default=None,
+                             help='RTSP URL (e.g., rtsp://192.168.50.2:8554/live/stream)')
+    source_group.add_argument('--http', type=str, default=None,
+                             help='HTTP stream URL (e.g., http://192.168.1.100:8080/stream)')
+
+    # Legacy RTSP options (for backward compatibility)
     parser.add_argument('--rtsp-ip', type=str, default=None,
-                       help='RTSP stream IP address (e.g., 192.168.50.2)')
+                       help='RTSP stream IP address (legacy)')
     parser.add_argument('--rtsp-port', type=int, default=8554,
                        help='RTSP stream port (default: 8554)')
     parser.add_argument('--rtsp-path', type=str, default='/live/stream',
                        help='RTSP stream path (default: /live/stream)')
+
+    # Additional options
+    parser.add_argument('--skip-native', action='store_true',
+                       help='Skip built-in/native cameras during auto-detection')
+
     return parser.parse_args()
 
 async def main():
     # Parse command line arguments
     args = parse_args()
+
+    # Handle --list-devices
+    if args.list_devices:
+        print("\n=== Available Video Devices ===")
+        devices = enumerate_video_devices()
+        if not devices:
+            print("No video devices found.")
+        else:
+            for i, dev in enumerate(devices, 1):
+                print(f"\n{i}. {dev.get('type', 'unknown').upper()}")
+                for key, value in dev.items():
+                    if key != 'type':
+                        print(f"   {key}: {value}")
+        print()
+        return
 
     # Set up signal handler for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
@@ -343,6 +435,7 @@ async def main():
         trust_remote_code=True,
         dtype=torch.bfloat16,
         device_map="mps", # "cuda" on Nvidia GPUs
+        local_files_only=True,  # Use cached model, don't download from HuggingFace
     )
     print("Model loaded successfully")
 
@@ -361,35 +454,136 @@ async def main():
     colors = [(0, 255, 0), (255, 0, 0), (0, 0, 255), (255, 255, 0), (0, 255, 255), (255, 0, 255)]
 
     # Determine video source based on arguments
-    if args.rtsp_ip:
-        # RTSP stream mode
+    video_source = None
+    source_type = None
+
+    if args.camera is not None:
+        # Direct camera index
+        video_source = args.camera
+        source_type = "camera"
+        print(f"\n=== Camera Mode ===")
+        print(f"Using camera index: {args.camera}")
+        print("===================\n")
+
+    elif args.device:
+        # Device path (e.g., /dev/video4)
+        video_source = args.device
+        source_type = "device"
+        print(f"\n=== Device Mode ===")
+        print(f"Using device: {args.device}")
+        print("===================\n")
+
+    elif args.rtsp:
+        # Direct RTSP URL
+        video_source = args.rtsp
+        source_type = "rtsp"
+        print(f"\n=== RTSP Stream Mode ===")
+        print(f"Connecting to: {args.rtsp}")
+        print("========================\n")
+
+    elif args.http:
+        # HTTP stream
+        video_source = args.http
+        source_type = "http"
+        print(f"\n=== HTTP Stream Mode ===")
+        print(f"Connecting to: {args.http}")
+        print("========================\n")
+
+    elif args.rtsp_ip:
+        # Legacy RTSP mode (backward compatibility)
         rtsp_url = f"rtsp://{args.rtsp_ip}:{args.rtsp_port}{args.rtsp_path}"
         video_source = rtsp_url
+        source_type = "rtsp"
         print(f"\n=== RTSP Stream Mode ===")
         print(f"Connecting to: {rtsp_url}")
         print("========================\n")
+
     else:
-        # Default webcam mode
-        video_source = 0
-        print(f"\n=== Default Camera Mode ===")
-        print(f"Using camera index: 0")
-        print("===========================\n")
+        # Auto-detect: try to find first available camera
+        print("\n=== Auto-detecting video source ===")
+        devices = enumerate_video_devices()
+
+        # Filter out native cameras if requested
+        if args.skip_native and devices:
+            non_native = [d for d in devices if not d.get('is_native', False)]
+            if non_native:
+                devices = non_native
+                print("Skipping native/built-in cameras...")
+            else:
+                # No non-native cameras found - ERROR OUT
+                print("\nError: --skip-native specified but no external cameras found!")
+                print("\nAvailable devices:")
+                for dev in devices:
+                    print(f"  - {dev.get('name', 'Unknown')} (native: {dev.get('is_native', False)})")
+                print("\nPlease:")
+                print("  1. Connect an external camera/capture device")
+                print("  2. Run: uv run -m detect --list-devices")
+                print("  3. Or remove --skip-native to use built-in camera")
+                await cleanup()
+                sys.exit(1)
+
+        if devices:
+            selected = devices[0]
+            video_source = selected.get('index', selected.get('path', 0))
+            source_type = "camera"
+            print(f"Found {len(devices)} device(s)")
+            print(f"Selected: {selected.get('name', 'Unknown')}")
+            print(f"  Index: {selected.get('index', selected.get('path', 'N/A'))}")
+            print(f"  Resolution: {selected.get('resolution', 'N/A')}")
+            print(f"  FPS: {selected.get('fps', 'N/A')}")
+            print("===================================\n")
+        else:
+            # No cameras found at all
+            if args.skip_native:
+                print("\nError: No cameras detected!")
+                print("  1. Connect a camera/capture device")
+                print("  2. Run: uv run -m detect --list-devices")
+            else:
+                # Fallback to default camera index 0
+                video_source = 0
+                source_type = "camera"
+                print(f"No devices detected, trying default camera (index 0)")
+            print("===================================\n")
+            if args.skip_native:
+                await cleanup()
+                sys.exit(1)
 
     # Open video stream
     cap = cv2.VideoCapture(video_source)
 
-    # Apply RTSP optimizations if using RTSP
-    if args.rtsp_ip:
-        # Set OpenCV parameters for low-latency RTSP streaming
+    # Apply optimizations based on source type
+    if source_type in ["rtsp", "http"]:
+        # Set OpenCV parameters for low-latency streaming
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimize buffer to reduce latency
-        # Note: Additional RTSP flags are handled by FFmpeg on the server side
+    elif source_type == "camera" and isinstance(video_source, int) and video_source > 0:
+        # Optimizations for external capture devices (Cam Link, etc.)
+        # These devices typically have hardware buffers, so minimize software buffering
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce latency
+
+        # Try to maximize frame rate for external devices
+        # Cam Link 4K supports 60fps at 1080p
+        cap.set(cv2.CAP_PROP_FPS, 60)
+
+        # Enable hardware acceleration if available
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+
+        print(f"Applied optimizations for external capture device")
+        print(f"  Buffer: Minimal for low latency")
+        print(f"  Target FPS: 60")
 
     if not cap.isOpened():
-        error_msg = f"RTSP stream at {video_source}" if args.rtsp_ip else "webcam"
-        print(f"Error: Could not open {error_msg}.")
-        if args.rtsp_ip:
-            print("Make sure the FFmpeg RTSP stream is running:")
-            print(f"  rtsp://{args.rtsp_ip}:{args.rtsp_port}{args.rtsp_path}")
+        print(f"Error: Could not open video source: {video_source}")
+        print(f"Source type: {source_type}")
+        if source_type == "rtsp":
+            print("\nTroubleshooting RTSP:")
+            print("  1. Verify the RTSP server is running")
+            print("  2. Check network connectivity")
+            print("  3. Confirm the RTSP URL is correct")
+        elif source_type == "camera":
+            print("\nTroubleshooting Camera:")
+            print("  1. Check if camera is connected")
+            print("  2. Run: uv run -m detect --list-devices")
+            print("  3. Try a different camera index")
         await cleanup()
         exit()
 
@@ -399,6 +593,20 @@ async def main():
 
     # Track publishing statistics
     total_published = 0
+
+    # Setup OpenCV window with proper positioning
+    window_title = f'Constellation ISR - Device: {device_fingerprint["device_id"][:8]}'
+    cv2.namedWindow(window_title, cv2.WINDOW_NORMAL)  # Resizable window
+
+    # Position window at top-left of screen (easily visible and movable)
+    cv2.moveWindow(window_title, 100, 100)
+
+    # Set window to a reasonable size (adjust based on your display)
+    # For 1080p capture, scale down to ~720p for easier viewing
+    cv2.resizeWindow(window_title, 1280, 720)
+
+    print(f"\nWindow positioned at (100, 100) with size 1280x720")
+    print(f"You can resize and move the window as needed\n")
 
     try:
         while True:
@@ -474,8 +682,7 @@ async def main():
             hostname_text = f"Host: {device_fingerprint['hostname']}"
             cv2.putText(frame, hostname_text, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
-            # Display the frame with detections (include device ID in window title)
-            window_title = f'Constellation ISR - Device: {device_fingerprint["device_id"][:8]}'
+            # Display the frame with detections
             cv2.imshow(window_title, frame)
 
             # Exit on 'q' key press
