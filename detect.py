@@ -14,6 +14,7 @@ import hashlib
 import uuid
 import subprocess
 import os
+import argparse
 
 # Global NATS connection and JetStream context
 nc = None
@@ -310,7 +311,21 @@ def signal_handler(signum, frame):
     asyncio.create_task(cleanup())
     sys.exit(0)
 
+def parse_args():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description='Constellation ISR Object Detection Client')
+    parser.add_argument('--rtsp-ip', type=str, default=None,
+                       help='RTSP stream IP address (e.g., 192.168.50.2)')
+    parser.add_argument('--rtsp-port', type=int, default=8554,
+                       help='RTSP stream port (default: 8554)')
+    parser.add_argument('--rtsp-path', type=str, default='/live/stream',
+                       help='RTSP stream path (default: /live/stream)')
+    return parser.parse_args()
+
 async def main():
+    # Parse command line arguments
+    args = parse_args()
+
     # Set up signal handler for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
 
@@ -341,11 +356,36 @@ async def main():
     # Define colors for bounding boxes (cycle through for different labels)
     colors = [(0, 255, 0), (255, 0, 0), (0, 0, 255), (255, 255, 0), (0, 255, 255), (255, 0, 255)]
 
-    # Open webcam stream
-    cap = cv2.VideoCapture(0)  # 0 is usually the default webcam
+    # Determine video source based on arguments
+    if args.rtsp_ip:
+        # RTSP stream mode
+        rtsp_url = f"rtsp://{args.rtsp_ip}:{args.rtsp_port}{args.rtsp_path}"
+        video_source = rtsp_url
+        print(f"\n=== RTSP Stream Mode ===")
+        print(f"Connecting to: {rtsp_url}")
+        print("========================\n")
+    else:
+        # Default webcam mode
+        video_source = 0
+        print(f"\n=== Default Camera Mode ===")
+        print(f"Using camera index: 0")
+        print("===========================\n")
+
+    # Open video stream
+    cap = cv2.VideoCapture(video_source)
+
+    # Apply RTSP optimizations if using RTSP
+    if args.rtsp_ip:
+        # Set OpenCV parameters for low-latency RTSP streaming
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimize buffer to reduce latency
+        # Note: Additional RTSP flags are handled by FFmpeg on the server side
 
     if not cap.isOpened():
-        print("Error: Could not open webcam.")
+        error_msg = f"RTSP stream at {video_source}" if args.rtsp_ip else "webcam"
+        print(f"Error: Could not open {error_msg}.")
+        if args.rtsp_ip:
+            print("Make sure the FFmpeg RTSP stream is running:")
+            print(f"  rtsp://{args.rtsp_ip}:{args.rtsp_port}{args.rtsp_path}")
         await cleanup()
         exit()
 
