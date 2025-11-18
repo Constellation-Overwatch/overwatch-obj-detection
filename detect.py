@@ -1,3 +1,10 @@
+import os
+from dotenv import load_dotenv
+
+# CRITICAL: Load .env BEFORE importing transformers to set offline mode
+load_dotenv()
+
+# Now import transformers with offline mode environment variables already set
 from transformers import AutoModelForCausalLM
 from PIL import Image
 import torch
@@ -13,10 +20,13 @@ import socket
 import hashlib
 import uuid
 import subprocess
-import os
 import argparse
 import glob
-from dotenv import load_dotenv
+
+# Suppress OpenCV logging globally (must be set before any VideoCapture calls)
+os.environ['OPENCV_LOG_LEVEL'] = 'SILENT'
+os.environ['OPENCV_VIDEOIO_DEBUG'] = '0'
+cv2.setLogLevel(0)
 
 # Global NATS connection and JetStream context
 nc = None
@@ -35,8 +45,7 @@ STREAM_NAME = None
 
 def get_constellation_ids():
     """Get organization_id and entity_id from environment or user input"""
-    # Load environment variables from .env file
-    load_dotenv()
+    # Note: .env is loaded at module import time (top of file)
 
     print("\n=== Constellation Configuration ===")
     print("Initializing Constellation Overwatch Edge Awareness connection...")
@@ -76,8 +85,14 @@ def get_constellation_ids():
 
     return org_id, ent_id
 
-def get_device_fingerprint(org_id, ent_id):
-    """Generate a comprehensive device fingerprint with metadata"""
+def get_device_fingerprint(org_id, ent_id, selected_device=None):
+    """Generate a comprehensive device fingerprint with metadata
+
+    Args:
+        org_id: Organization ID
+        ent_id: Entity ID
+        selected_device: Optional dict with selected camera/video device info
+    """
     fingerprint_data = {}
 
     # Constellation identifiers
@@ -110,8 +125,8 @@ def get_device_fingerprint(org_id, ent_id):
     except:
         fingerprint_data['mac_address'] = 'unknown'
 
-    # Get camera information if available
-    camera_info = get_camera_info()
+    # Get camera information - use selected device if provided
+    camera_info = get_camera_info(selected_device)
     if camera_info:
         fingerprint_data['camera'] = camera_info
 
@@ -136,11 +151,26 @@ def get_device_fingerprint(org_id, ent_id):
 
     return fingerprint_data
 
-def get_camera_info():
-    """Get camera device information"""
+def get_camera_info(selected_device=None):
+    """Get camera device information
+
+    Args:
+        selected_device: Optional dict with device info from enumerate_video_devices()
+                        If provided, uses this device instead of hardcoded index 0
+    """
     camera_info = {}
 
-    # Try to get camera info based on platform
+    # If a specific device was selected, use that info
+    if selected_device:
+        camera_info['name'] = selected_device.get('name', 'Unknown Camera')
+        camera_info['index'] = selected_device.get('index', 0)
+        camera_info['backend'] = selected_device.get('backend', 'opencv')
+        camera_info['resolution'] = selected_device.get('resolution', 'unknown')
+        camera_info['fps'] = selected_device.get('fps', 'unknown')
+        camera_info['is_native'] = selected_device.get('is_native', False)
+        return camera_info
+
+    # Fallback: try to get camera info based on platform
     if platform.system() == 'Darwin':  # macOS
         try:
             # Use system_profiler to get camera info on macOS
@@ -182,8 +212,12 @@ def get_camera_info():
 
     return camera_info if camera_info else {'name': 'Default Camera', 'index': 0}
 
-async def setup_nats():
-    """Connect to NATS server and create JetStream context"""
+async def setup_nats(selected_device=None):
+    """Connect to NATS server and create JetStream context
+
+    Args:
+        selected_device: Optional dict with selected camera/video device info
+    """
     global nc, js, device_fingerprint, organization_id, entity_id, SUBJECT, STREAM_NAME
 
     # Get constellation identifiers first
@@ -211,15 +245,19 @@ async def setup_nats():
         print(f"Warning: Stream {STREAM_NAME} not found. Messages may not be persisted.")
         print(f"Error: {e}")
 
-    # Generate device fingerprint during bootsequence
+    # Generate device fingerprint during bootsequence with selected device
     print("\n=== Bootsequence: Device Fingerprinting ===")
-    device_fingerprint = get_device_fingerprint(organization_id, entity_id)
+    device_fingerprint = get_device_fingerprint(organization_id, entity_id, selected_device)
     print(f"Organization ID: {device_fingerprint['organization_id']}")
     print(f"Entity ID: {device_fingerprint['entity_id']}")
     print(f"Device ID: {device_fingerprint['device_id']}")
     print(f"Hostname: {device_fingerprint['hostname']}")
     print(f"Platform: {device_fingerprint['platform']['system']} {device_fingerprint['platform']['release']}")
     print(f"Camera: {device_fingerprint['camera']['name']}")
+    if selected_device:
+        print(f"  Index: {device_fingerprint['camera']['index']}")
+        print(f"  Resolution: {device_fingerprint['camera']['resolution']}")
+        print(f"  Native: {device_fingerprint['camera']['is_native']}")
     print("=========================================\n")
 
     # Publish bootsequence event with device fingerprint
@@ -320,12 +358,31 @@ def enumerate_video_devices(verbose=False):
     """Enumerate available video capture devices"""
     devices = []
 
+    # Get camera names from system_profiler on macOS
+    camera_names = {}
+    if platform.system() == 'Darwin':
+        try:
+            result = subprocess.run(
+                ['system_profiler', 'SPCameraDataType', '-json'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                if 'SPCameraDataType' in data:
+                    for idx, cam in enumerate(data['SPCameraDataType']):
+                        camera_names[idx] = cam.get('_name', f'Camera {idx}')
+        except:
+            pass
+
     # Suppress OpenCV warnings during enumeration
     if not verbose:
         cv2.setLogLevel(0)  # Suppress all OpenCV logging
 
-    # Try indices 0-9
-    for index in range(10):
+    # Try indices 0-4 (most systems don't have more than 4 cameras)
+    # Reduce range to minimize startup time and warning messages
+    for index in range(5):
         cap = cv2.VideoCapture(index)
         if cap.isOpened():
             # Get device info
@@ -334,8 +391,14 @@ def enumerate_video_devices(verbose=False):
             fps = int(cap.get(cv2.CAP_PROP_FPS))
             backend = cap.getBackendName()
 
-            # Determine if this is a built-in camera
-            is_native = (platform.system() == 'Darwin' and index == 0 and backend == 'AVFOUNDATION')
+            # Get actual camera name
+            if platform.system() == 'Darwin':
+                camera_name = camera_names.get(index, f'Camera {index}')
+                # Determine if this is a built-in camera based on name
+                is_native = ('FaceTime' in camera_name or 'Built-in' in camera_name or index == 0)
+            else:
+                camera_name = f'Camera {index}'
+                is_native = False
 
             devices.append({
                 'index': index,
@@ -344,7 +407,7 @@ def enumerate_video_devices(verbose=False):
                 'fps': fps,
                 'backend': backend,
                 'is_native': is_native,
-                'name': 'FaceTime HD Camera (Built-in)' if is_native else f'Camera {index}'
+                'name': camera_name
             })
             cap.release()
 
@@ -425,37 +488,12 @@ async def main():
     # Set up signal handler for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
 
-    # Connect to NATS and JetStream
-    nc, js = await setup_nats()
-
-    # Load the model
-    print("Loading Moondream model...")
-    model = AutoModelForCausalLM.from_pretrained(
-        "vikhyatk/moondream2",
-        trust_remote_code=True,
-        dtype=torch.bfloat16,
-        device_map="mps", # "cuda" on Nvidia GPUs
-        local_files_only=True,  # Use cached model, don't download from HuggingFace
-    )
-    print("Model loaded successfully")
-
-    # Query for detection (you can modify this as needed)
-    prompt = "Objects"
-
-    if prompt.strip():
-        object_prompt = f"List all {prompt.strip()} you can see in this image. Return your answer as a simple comma-separated list of object names."
-    else:
-        object_prompt = "List all the objects you can see in this image. Return your answer as a simple comma-separated list of object names."
-
-    # Optional sampling settings for detection
-    settings = {"max_objects": 50}
-
-    # Define colors for bounding boxes (cycle through for different labels)
-    colors = [(0, 255, 0), (255, 0, 0), (0, 0, 255), (255, 255, 0), (0, 255, 255), (255, 0, 255)]
-
-    # Determine video source based on arguments
+    # =========================================================================
+    # STEP 1: Determine video source BEFORE device fingerprinting
+    # =========================================================================
     video_source = None
     source_type = None
+    selected_device = None  # Will be populated for auto-detect mode
 
     if args.camera is not None:
         # Direct camera index
@@ -519,18 +557,17 @@ async def main():
                 print("  1. Connect an external camera/capture device")
                 print("  2. Run: uv run -m detect --list-devices")
                 print("  3. Or remove --skip-native to use built-in camera")
-                await cleanup()
                 sys.exit(1)
 
         if devices:
-            selected = devices[0]
-            video_source = selected.get('index', selected.get('path', 0))
+            selected_device = devices[0]  # Save for fingerprinting
+            video_source = selected_device.get('index', selected_device.get('path', 0))
             source_type = "camera"
             print(f"Found {len(devices)} device(s)")
-            print(f"Selected: {selected.get('name', 'Unknown')}")
-            print(f"  Index: {selected.get('index', selected.get('path', 'N/A'))}")
-            print(f"  Resolution: {selected.get('resolution', 'N/A')}")
-            print(f"  FPS: {selected.get('fps', 'N/A')}")
+            print(f"Selected: {selected_device.get('name', 'Unknown')}")
+            print(f"  Index: {selected_device.get('index', selected_device.get('path', 'N/A'))}")
+            print(f"  Resolution: {selected_device.get('resolution', 'N/A')}")
+            print(f"  FPS: {selected_device.get('fps', 'N/A')}")
             print("===================================\n")
         else:
             # No cameras found at all
@@ -538,18 +575,109 @@ async def main():
                 print("\nError: No cameras detected!")
                 print("  1. Connect a camera/capture device")
                 print("  2. Run: uv run -m detect --list-devices")
+                print("===================================\n")
+                sys.exit(1)
             else:
                 # Fallback to default camera index 0
                 video_source = 0
                 source_type = "camera"
                 print(f"No devices detected, trying default camera (index 0)")
-            print("===================================\n")
-            if args.skip_native:
-                await cleanup()
-                sys.exit(1)
+                print("===================================\n")
 
-    # Open video stream
-    cap = cv2.VideoCapture(video_source)
+    # =========================================================================
+    # STEP 2: Connect to NATS and fingerprint with selected device
+    # =========================================================================
+    nc, js = await setup_nats(selected_device)
+
+    # =========================================================================
+    # STEP 3: Load the model
+    # =========================================================================
+    print("Loading Moondream model...")
+    model = AutoModelForCausalLM.from_pretrained(
+        "vikhyatk/moondream2",
+        trust_remote_code=True,
+        dtype=torch.bfloat16,
+        device_map="mps", # "cuda" on Nvidia GPUs
+        local_files_only=True,  # Use cached model, don't download from HuggingFace
+    )
+    print("Model loaded successfully")
+
+    # Query for detection (you can modify this as needed)
+    prompt = "Objects"
+
+    if prompt.strip():
+        object_prompt = f"List all {prompt.strip()} you can see in this image. Return your answer as a simple comma-separated list of object names."
+    else:
+        object_prompt = "List all the objects you can see in this image. Return your answer as a simple comma-separated list of object names."
+
+    # Optional sampling settings for detection
+    settings = {"max_objects": 50}
+
+    # Define colors for bounding boxes (cycle through for different labels)
+    colors = [(0, 255, 0), (255, 0, 0), (0, 0, 255), (255, 255, 0), (0, 255, 255), (255, 0, 255)]
+
+    # Open video stream with explicit backend for macOS reliability
+    if source_type == "camera" and isinstance(video_source, int) and platform.system() == 'Darwin':
+        # On macOS, use CAP_AVFOUNDATION explicitly to ensure correct camera selection
+        cap = cv2.VideoCapture(video_source, cv2.CAP_AVFOUNDATION)
+        print(f"Opening camera index {video_source} with AVFoundation backend...")
+    else:
+        cap = cv2.VideoCapture(video_source)
+
+    if not cap.isOpened():
+        print(f"Error: Could not open video source: {video_source}")
+        print(f"Source type: {source_type}")
+        if source_type == "rtsp":
+            print("\nTroubleshooting RTSP:")
+            print("  1. Verify the RTSP server is running")
+            print("  2. Check network connectivity")
+            print("  3. Confirm the RTSP URL is correct")
+        elif source_type == "camera":
+            print("\nTroubleshooting Camera:")
+            print("  1. Check if camera is connected")
+            print("  2. Run: uv run -m detect --list-devices")
+            print("  3. Try a different camera index")
+        await cleanup()
+        exit()
+
+    # Verify which device was actually opened and detect if wrong camera
+    actual_camera_name = "Unknown"
+    if source_type == "camera" and isinstance(video_source, int):
+        actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps = int(cap.get(cv2.CAP_PROP_FPS))
+        actual_backend = cap.getBackendName()
+
+        # Try to get actual camera name via system_profiler
+        if platform.system() == 'Darwin':
+            try:
+                result = subprocess.run(
+                    ['system_profiler', 'SPCameraDataType', '-json'],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0:
+                    data = json.loads(result.stdout)
+                    if 'SPCameraDataType' in data and len(data['SPCameraDataType']) > video_source:
+                        actual_camera_name = data['SPCameraDataType'][video_source].get('_name', 'Unknown')
+            except:
+                pass
+
+        print(f"\n=== Video Stream Verification ===")
+        print(f"Requested index: {video_source}")
+        print(f"Actual camera: {actual_camera_name}")
+        print(f"Resolution: {actual_width}x{actual_height}")
+        print(f"FPS: {actual_fps}")
+        print(f"Backend: {actual_backend}")
+
+        # Warn if we got the wrong camera
+        if selected_device:
+            expected_name = selected_device.get('name', '')
+            if expected_name and expected_name != actual_camera_name:
+                print(f"\n⚠️  WARNING: Requested '{expected_name}' but opened '{actual_camera_name}'!")
+                print(f"⚠️  OpenCV may have opened the wrong camera index!")
+                print(f"⚠️  Try using --camera {video_source} explicitly or check camera connections.")
+
+        print("=================================\n")
 
     # Apply optimizations based on source type
     if source_type in ["rtsp", "http"]:
@@ -569,7 +697,7 @@ async def main():
 
         print(f"Applied optimizations for external capture device")
         print(f"  Buffer: Minimal for low latency")
-        print(f"  Target FPS: 60")
+        print(f"  Target FPS: 60\n")
 
     if not cap.isOpened():
         print(f"Error: Could not open video source: {video_source}")
@@ -594,8 +722,9 @@ async def main():
     # Track publishing statistics
     total_published = 0
 
-    # Setup OpenCV window with proper positioning
-    window_title = f'Constellation ISR - Device: {device_fingerprint["device_id"][:8]}'
+    # Setup OpenCV window with proper positioning and camera name
+    camera_name = actual_camera_name if 'actual_camera_name' in locals() else device_fingerprint["camera"]["name"]
+    window_title = f'Constellation ISR - {camera_name}'
     cv2.namedWindow(window_title, cv2.WINDOW_NORMAL)  # Resizable window
 
     # Position window at top-left of screen (easily visible and movable)
@@ -605,7 +734,8 @@ async def main():
     # For 1080p capture, scale down to ~720p for easier viewing
     cv2.resizeWindow(window_title, 1280, 720)
 
-    print(f"\nWindow positioned at (100, 100) with size 1280x720")
+    print(f"\nWindow: '{window_title}'")
+    print(f"Positioned at (100, 100) with size 1280x720")
     print(f"You can resize and move the window as needed\n")
 
     try:

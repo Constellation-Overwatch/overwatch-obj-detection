@@ -133,6 +133,23 @@ uv run -m detect --list-devices
 
 Shows all available video capture devices with details (resolution, FPS, backend).
 
+### Camera Diagnostics (Recommended for macOS)
+
+On macOS, camera indices detected by system tools may not match OpenCV's actual indexing. Use the diagnostics tool to verify which camera is at which index:
+
+```sh
+uv run camera_diagnostics.py
+```
+
+This will:
+
+- List all detected cameras from both system_profiler and OpenCV
+- Show resolution, FPS, and backend for each camera
+- Offer to preview each camera so you can verify which is which
+- Help you determine the correct index to use with `--camera`
+
+**Important:** The preview test is the most reliable way to confirm which camera index corresponds to your desired video source.
+
 ### Video Source Options
 
 #### Camera by Index
