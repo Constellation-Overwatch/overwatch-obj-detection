@@ -1,0 +1,1 @@
+uv run -m detect --rtsp-ip 192.168.50.2 --rtsp-port 8554 --rtsp-path /live/stream

@@ -15,6 +15,7 @@ import uuid
 import subprocess
 import os
 import argparse
+from dotenv import load_dotenv
 
 # Global NATS connection and JetStream context
 nc = None
@@ -33,6 +34,9 @@ STREAM_NAME = None
 
 def get_constellation_ids():
     """Get organization_id and entity_id from environment or user input"""
+    # Load environment variables from .env file
+    load_dotenv()
+
     print("\n=== Constellation Configuration ===")
     print("Initializing Constellation Overwatch Edge Awareness connection...")
     print()
