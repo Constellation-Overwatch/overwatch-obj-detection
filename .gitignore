@@ -6,3 +6,7 @@ __pycache__/
 .env
 
 models/
+
+# Prevent model files from being downloaded to root
+*.pt
+*.ts

@@ -735,30 +735,55 @@ async def main():
             print(f"    {threat_level}: {len(config['classes'])} classes")
             print(f"      Examples: {', '.join(config['classes'][:3])}")
 
-        # Ensure mobileclip text encoder is also in models/ directory
-        mobileclip_path = os.path.join(models_dir, "mobileclip_blt.ts")
-        if not os.path.exists(mobileclip_path):
-            print(f"\n  MobileClip text encoder not found at {mobileclip_path}")
-            print(f"  Downloading MobileClip for text prompt embeddings...")
-            # Trigger download by calling get_text_pe with a dummy class
-            # This will download mobileclip to ~/.ultralytics/weights/
-            try:
-                import shutil
-                _ = model.get_text_pe(["initialization"])  # Trigger download
-                default_mobileclip = os.path.expanduser("~/.ultralytics/weights/mobileclip_blt.ts")
-                if os.path.exists(default_mobileclip):
-                    shutil.copy(default_mobileclip, mobileclip_path)
-                    print(f"  ✓ MobileClip copied to {mobileclip_path}")
-            except Exception as e:
-                print(f"  Warning: Could not copy mobileclip model: {e}")
+        # Ensure mobileclip text encoder is available
+        # YOLOE looks for mobileclip in ~/.ultralytics/weights/ when calling get_text_pe()
+        import shutil
+        mobileclip_local = os.path.join(models_dir, "mobileclip_blt.ts")
+        mobileclip_cache = os.path.expanduser("~/.ultralytics/weights/mobileclip_blt.ts")
+        mobileclip_root = os.path.join(script_dir, "mobileclip_blt.ts")  # Unwanted location
+
+        # Clean up any partial downloads in root directory
+        if os.path.exists(mobileclip_root):
+            print(f"\n  Found mobileclip in root directory, moving to models/...")
+            if not os.path.exists(mobileclip_local):
+                shutil.move(mobileclip_root, mobileclip_local)
+            else:
+                os.remove(mobileclip_root)
+            print(f"  ✓ Cleaned up root directory")
+
+        # Ensure the cache directory exists
+        os.makedirs(os.path.dirname(mobileclip_cache), exist_ok=True)
+
+        # Strategy: Keep mobileclip in both locations to prevent re-downloading
+        if os.path.exists(mobileclip_local) and not os.path.exists(mobileclip_cache):
+            # Copy from models/ to cache so YOLOE finds it
+            print(f"\n  Copying MobileClip from models/ to Ultralytics cache...")
+            shutil.copy(mobileclip_local, mobileclip_cache)
+            print(f"  ✓ MobileClip available at {mobileclip_cache}")
+        elif os.path.exists(mobileclip_cache) and not os.path.exists(mobileclip_local):
+            # Copy from cache to models/ for centralized storage
+            print(f"\n  Copying MobileClip from cache to models/...")
+            shutil.copy(mobileclip_cache, mobileclip_local)
+            print(f"  ✓ MobileClip available at {mobileclip_local}")
+        elif not os.path.exists(mobileclip_cache) and not os.path.exists(mobileclip_local):
+            print(f"\n  MobileClip text encoder not found")
+            print(f"  Will download on first get_text_pe() call...")
+            print(f"  Target: {mobileclip_cache}")
         else:
-            print(f"\n  ✓ MobileClip text encoder found at {mobileclip_path}")
+            print(f"\n  ✓ MobileClip text encoder found in both locations")
+            print(f"    Cache: {mobileclip_cache}")
+            print(f"    Local: {mobileclip_local}")
 
         # Set classes using YOLOE's text prompt API
         print(f"\n  Setting text prompts for YOLOE...")
         text_embeddings = model.get_text_pe(ALL_CLASSES)
         model.set_classes(ALL_CLASSES, text_embeddings)
         print(f"  ✓ Text prompts configured for {len(ALL_CLASSES)} classes")
+
+        # After first call, ensure mobileclip is in models/ directory too
+        if os.path.exists(mobileclip_cache) and not os.path.exists(mobileclip_local):
+            shutil.copy(mobileclip_cache, mobileclip_local)
+            print(f"  ✓ MobileClip cached to models/ directory")
 
         print(f"\n  Confidence threshold: {args.conf}")
         print(f"  Minimum frames for threat alert: {args.min_frames}")
