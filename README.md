@@ -1,13 +1,61 @@
 # Constellation Overwatch Object Detection Client
 
+## TODO:
+- refactor all py scripts into single model swapable modularity flags
+
 Run real-time video edge inference and transmit detected objects as events to [Constellation Overwatch](https://github.com/Constellation-Overwatch/constellation-overwatch).
 
-Two detection models available:
+## Available Detection Models
 
-- **RT-DETR** (Recommended): Real-time transformer detection, 30-60 FPS, 80 COCO classes
-- **Moondream**: Vision-language model with natural language queries (slower)
+### Model Comparison
+
+| Model | Script | FPS | Classes | Threat Detection | Best For |
+|-------|--------|-----|---------|------------------|----------|
+| **RT-DETR** | `detect_rtdetr.py` | 30-60 | 80 COCO | ❌ | Production, Real-time |
+| **YOLOE C4ISR** | `detect_yoloe_c4isr.py` | 15-30 | Custom (text prompts) | ✅ 4-level | Military, Security |
+| **YOLOE** | `detect_yoloe.py` | 15-30 | Custom (text prompts) | ❌ | Custom detection, Tracking |
+| **SAM3** | `detect_sam3.py` | 10-20 | Any (auto-segment) | ❌ | Segmentation, Masks |
+| **Moondream** | `detect.py` | 2-5 | Any (natural language) | ❌ | Research, Flexibility |
+
+### Production Models
+
+1. **RT-DETR** (`detect_rtdetr.py`) - **Recommended for Real-Time**
+   - Real-time transformer detection, 30-60 FPS
+   - 80 COCO classes (person, car, dog, etc.)
+   - Model: `rtdetr-l.pt` (~115MB)
+   - Best for: Production, real-time surveillance
+
+2. **YOLOE C4ISR** (`detect_yoloe_c4isr.py`) - **C4ISR Threat Detection**
+   - Open-vocabulary detection with text prompts
+   - Threat classification (HIGH/MEDIUM/LOW/NORMAL)
+   - Publishes individual detection events + aggregated threat intelligence
+   - Model: `yoloe-11l-seg.pt` (~140MB)
+   - Best for: Military operations, threat assessment, security
+
+3. **YOLOE** (`detect_yoloe.py`) - **Open-Vocabulary Detection**
+   - Text-prompt based object detection
+   - Object tracking with BoTSORT
+   - Detects any class via text descriptions
+   - Model: `yoloe-11l-seg.pt` (~140MB)
+   - Best for: Custom object detection, flexible queries
+
+4. **SAM3** (`detect_sam3.py`) - **Segmentation Anything**
+   - Automatic mask generation (currently uses SAM2)
+   - Instance segmentation without prompts
+   - Pixel-precise object boundaries
+   - Model: `sam2_b.pt` (~90MB)
+   - Best for: Precise segmentation, object isolation
+
+### Legacy Models
+
+1. **Moondream** (`detect.py`) - **Vision-Language Model**
+   - Natural language queries
+   - Flexible detection
+   - Slower inference (~2-5 FPS)
+   - Best for: Research, flexible queries
 
 ### EXPERIMENTAL
+
 Only tested on macOS. Needs to be integrated with ffmpeg streams from ROS and aviation feeds.
 
 ## Requirements
@@ -112,31 +160,84 @@ If these environment variables are not set, the client will prompt you to enter 
 
 ## Usage
 
-### Model Selection
+### Quick Start Guide
 
-Two detection models are available:
+Choose the detection model based on your use case:
 
-#### RT-DETR (Recommended for Real-Time)
+#### 1. RT-DETR - Fast Real-Time Detection (Recommended)
 
 ```sh
 # Auto-detect camera
 uv run -m detect_rtdetr
 
-# Use specific camera
+# Specific camera
 uv run -m detect_rtdetr --camera 0
+
+# RTSP stream
+uv run -m detect_rtdetr --rtsp rtsp://192.168.50.2:8554/live/stream
 ```
 
-**Advantages:**
+**Best for:** Production, surveillance, high FPS requirements
 
-- **Fast**: 30-60 FPS real-time detection
-- **No downloads**: Instant startup, no HuggingFace delays
-- **Pre-trained**: Detects 80 COCO classes (person, car, dog, etc.)
-- **Confidence scores**: Each detection includes confidence level
-- **Production-ready**: Battle-tested YOLO architecture
+#### 2. YOLOE C4ISR - Military Threat Detection
 
-Model location: `models/rtdetr-l.pt` (downloads automatically on first run)
+```sh
+# Auto-detect camera with threat classification
+uv run python detect_yoloe_c4isr.py --camera 0
 
-#### Moondream (Flexible Natural Language)
+# Lower confidence for sensitive detection
+uv run python detect_yoloe_c4isr.py --conf 0.15 --min-frames 1
+
+# Add custom threat classes
+uv run python detect_yoloe_c4isr.py --custom-threats "drone" "robot"
+```
+
+**Best for:** C4ISR operations, threat assessment, security monitoring
+
+**Features:**
+
+- Text-prompt threat detection (weapon, suspicious package, person, etc.)
+- 4-level threat classification (HIGH/MEDIUM/LOW/NORMAL)
+- Individual detection events + aggregated threat intelligence
+- Color-coded bounding boxes with corner markers
+- Publishes to both JetStream (events) and KV store (state)
+
+**Published Events:**
+
+- `detection` events - Each individual detection to stream
+- `threat_alert` events - Aggregated threat intelligence
+- `bootsequence` / `shutdown` - System lifecycle events
+
+**KV Store Keys:**
+
+- `{entity_id}.c4isr.threat_intelligence` - Full threat data
+- `{entity_id}.analytics.c4isr_summary` - Analytics summary
+
+#### 3. YOLOE - Open-Vocabulary Detection
+
+```sh
+# Auto-detect camera with object tracking
+uv run python detect_yoloe.py --camera 0
+
+# Adjust tracking parameters
+uv run python detect_yoloe.py --min-frames 3 --tracker botsort.yaml
+```
+
+**Best for:** Custom object detection, flexible queries, object tracking
+
+#### 4. SAM3 - Segmentation Anything
+
+```sh
+# Auto-detect camera with automatic segmentation
+uv run python detect_sam3.py --camera 0
+
+# Adjust segmentation sensitivity
+uv run python detect_sam3.py --conf 0.3 --imgsz 1024
+```
+
+**Best for:** Precise segmentation, object isolation, mask generation
+
+#### 5. Moondream - Vision-Language Model (Legacy)
 
 ```sh
 # Auto-detect camera
@@ -146,17 +247,9 @@ uv run -m detect
 uv run -m detect --camera 0
 ```
 
-**Advantages:**
+**Best for:** Research, flexible natural language queries
 
-- **Natural language queries**: Ask "what objects do you see?"
-- **Flexible**: Can detect anything described in text
-- **Accurate**: Vision-language model understanding
-
-**Trade-offs:**
-
-- Slower inference (~2-5 FPS)
-- Requires HuggingFace model download
-- Higher memory usage
+**Trade-offs:** Slower inference (~2-5 FPS), higher memory usage
 
 ### Quick Start
 
@@ -291,33 +384,58 @@ The client automatically applies optimizations:
 
 #### Model Storage
 
-Models are stored in the `models/` directory:
+All models are automatically downloaded to the `models/` directory on first run:
 
 ```text
 obj-detection-client/
 ├── models/
-│   └── rtdetr-l.pt          # RT-DETR model (~115MB)
+│   ├── rtdetr-l.pt          # RT-DETR model (~115MB)
+│   ├── yoloe-11l-seg.pt     # YOLOE model (~140MB)
+│   └── sam2_b.pt            # SAM2 model (~90MB)
 └── ~/.cache/huggingface/    # Moondream models (downloaded on first run)
 ```
 
-**RT-DETR**: Downloads automatically to `models/rtdetr-l.pt` on first run
+**Model Download Behavior:**
 
-**Moondream**: Downloads to HuggingFace cache directory on first run
+1. **First Run:** Models download automatically from Ultralytics
+2. **Caching:** Models are cached in `models/` directory for offline use
+3. **No Re-downloads:** Existing models are reused on subsequent runs
+
+**Storage Requirements:**
+
+- RT-DETR: ~115MB
+- YOLOE (both versions): ~140MB (shared model file)
+- SAM2/SAM3: ~90MB
+- Moondream: ~3GB (HuggingFace cache)
 
 #### Window Positioning
 
-The OpenCV display window is automatically positioned at (100, 100) with a size of 1280x720 pixels. The window is resizable and can be moved as needed.
+The OpenCV display window is automatically **centered on screen** with a size of 1280x720 pixels. The window is **fully draggable and resizable** after opening.
 
-Window titles:
+**Window Features:**
+
+- Auto-centered on startup
+- Draggable to any position
+- Resizable (maintains aspect ratio)
+- Professional threat indicators (C4ISR model)
+- Corner markers on bounding boxes (C4ISR model)
+
+**Window Titles:**
 
 - RT-DETR: `Constellation ISR - [Camera Name]`
+- YOLOE C4ISR: `C4ISR Threat Detection - [Camera Name]`
+- YOLOE: `Constellation ISR Tracking - [Camera Name]`
+- SAM3: `Constellation ISR Segmentation - [Camera Name]`
 - Moondream: `Constellation ISR - Device: [Device ID]`
 
-To exit the stream, press `q` in the video window.
+**Controls:**
+
+- Press `q` to exit the stream
+- Window can be dragged and resized during operation
 
 #### Detection Output Format
 
-Both models publish the same JetStream event format:
+**Standard Detection Event (RT-DETR, YOLOE):**
 
 ```json
 {
@@ -345,4 +463,63 @@ Both models publish the same JetStream event format:
 }
 ```
 
-**Note**: RT-DETR includes `confidence` scores, Moondream does not.
+**C4ISR Detection Event (YOLOE C4ISR):**
+
+```json
+{
+  "timestamp": "2025-01-18T12:34:56.789Z",
+  "event_type": "detection",
+  "entity_id": "1048bff5-5b97-4fa8-a0f1-061662b32163",
+  "device_id": "85c48d7842ce14df",
+  "detection": {
+    "track_id": "123_0",
+    "label": "weapon",
+    "confidence": 0.92,
+    "threat_level": "HIGH_THREAT",
+    "bbox": {
+      "x_min": 0.2,
+      "y_min": 0.3,
+      "x_max": 0.8,
+      "y_max": 0.9
+    },
+    "suspicious_indicators": [
+      "high_confidence_weapon_detection"
+    ]
+  }
+}
+```
+
+**C4ISR Threat Intelligence (KV Store):**
+
+```json
+{
+  "timestamp": "2025-01-18T12:34:56.789Z",
+  "entity_id": "1048bff5-5b97-4fa8-a0f1-061662b32163",
+  "device_id": "85c48d7842ce14df",
+  "mission": "C4ISR",
+  "threat_summary": {
+    "total_threats": 2,
+    "threat_distribution": {
+      "HIGH_THREAT": 1,
+      "MEDIUM_THREAT": 1
+    },
+    "alert_level": "HIGH"
+  },
+  "tracked_objects": {
+    "123_0": {
+      "track_id": "123_0",
+      "label": "weapon",
+      "threat_level": "HIGH_THREAT",
+      "avg_confidence": 0.89,
+      "suspicious_indicators": ["high_confidence_weapon_detection"]
+    }
+  }
+}
+```
+
+**Notes:**
+
+- RT-DETR and YOLOE include `confidence` scores
+- C4ISR model publishes **both** individual detection events and aggregated threat intelligence
+- SAM3 publishes segmentation masks with detection events
+- Moondream does not include confidence scores

@@ -6,11 +6,15 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "accelerate>=1.11.0",
+    "ftfy>=6.3.1",
+    "lap>=0.5.12",
     "nats-py>=2.12.0",
+    "open-clip-torch>=3.2.0",
     "opencv-contrib-python>=4.12.0.88",
     "opencv-python>=4.12.0.88",
     "pillow>=12.0.0",
     "python-dotenv>=1.2.1",
+    "regex>=2025.11.3",
     "torch>=2.9.0",
     "transformers>=4.57.1",
     "ultralytics>=8.3.228",
