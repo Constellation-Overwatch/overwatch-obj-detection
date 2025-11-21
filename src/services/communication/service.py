@@ -196,7 +196,7 @@ class OverwatchCommunication:
         """Publish C4ISR threat intelligence to KV store."""
         if not self.kv or not hasattr(tracking_state, 'threat_alerts'):
             return
-        
+
         try:
             analytics = tracking_state.get_analytics()
             threat_data = {
@@ -212,11 +212,19 @@ class OverwatchCommunication:
                 },
                 "threat_alerts": analytics.get("threat_alerts", [])
             }
-            
-            # Store threat intelligence using helper
+
+            # Store full threat intelligence
             key = build_kv_key(self.entity_id, "c4isr", "threat_intelligence")
             await self.kv.put(key, json.dumps(threat_data).encode())
-            
+
+            # Store C4ISR analytics summary (for existing pattern compatibility)
+            c4isr_summary_key = build_kv_key(self.entity_id, "analytics", "c4isr_summary")
+            await self.kv.put(c4isr_summary_key, json.dumps({
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "entity_id": self.entity_id,
+                **analytics
+            }).encode())
+
         except Exception as e:
             print(f"Error publishing threat intelligence to KV: {e}")
     

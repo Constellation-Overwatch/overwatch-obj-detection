@@ -254,21 +254,26 @@ class TransportAdapter(ABC):
 
 def validate_entity_id(entity_id: str) -> bool:
     """
-    Validate entity_id format per Overwatch requirements.
+    Validate entity_id VALUE format per Overwatch requirements.
 
-    Valid characters: a-z, A-Z, 0-9, hyphens, underscores (except leading)
-    Invalid: dots, asterisks, spaces, special characters
+    IMPORTANT: This validates the entity_id ITSELF, not KV key paths.
+    - entity_id VALUES cannot contain dots (e.g., "device.123" is invalid)
+    - KV key PATHS can use dots for hierarchy (e.g., "device123.analytics.summary" is valid)
+
+    Valid characters in entity_id: a-z, A-Z, 0-9, hyphens, underscores (except leading)
+    Invalid in entity_id: dots, asterisks, spaces, special characters
 
     Args:
-        entity_id: Entity identifier to validate
+        entity_id: Entity identifier VALUE to validate
 
     Returns:
-        True if valid, False otherwise
+        True if valid entity_id, False otherwise
 
     Example:
-        validate_entity_id("1048bff5-5b97-4fa8")  # True
-        validate_entity_id("device.123")          # False (contains dot)
-        validate_entity_id("sensor*01")           # False (contains asterisk)
+        validate_entity_id("1048bff5-5b97-4fa8")  # True - valid entity_id
+        validate_entity_id("device-123")          # True - valid entity_id
+        validate_entity_id("device.123")          # False - dot in entity_id value
+        validate_entity_id("sensor*01")           # False - asterisk not allowed
     """
     import re
     pattern = r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$'
