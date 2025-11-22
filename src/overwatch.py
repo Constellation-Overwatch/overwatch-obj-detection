@@ -5,9 +5,18 @@ Minimal orchestrator that coordinates all detection services.
 Defaults to YOLOE C4ISR threat detection mode.
 """
 
-import asyncio
+# CRITICAL: Load .env BEFORE any imports that read environment variables
 import os
 from pathlib import Path
+try:
+    from dotenv import load_dotenv
+    env_path = Path(__file__).parent.parent / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
+except ImportError:
+    pass  # dotenv not available, skip
+
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
@@ -257,15 +266,6 @@ class OverwatchOrchestrator:
 
 async def main():
     """Main entry point."""
-    # Load environment variables from .env file
-    try:
-        from dotenv import load_dotenv
-        env_path = Path(__file__).parent.parent / '.env'
-        if env_path.exists():
-            load_dotenv(env_path)
-    except ImportError:
-        pass  # dotenv not available, skip
-    
     # Setup
     setup_logging()
     args = validate_arguments(parse_arguments())

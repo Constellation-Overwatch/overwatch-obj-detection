@@ -60,6 +60,7 @@ class OverwatchCommunication:
     
     async def _connect_nats(self) -> None:
         """Connect to NATS server."""
+        print(f"Attempting to connect to NATS at: {self.nats_config['url']}")
         self.nc = await nats.connect(self.nats_config["url"])
         print("Connected to NATS server")
     
