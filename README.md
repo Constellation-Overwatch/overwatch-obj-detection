@@ -24,10 +24,12 @@
 
 * **Multi-Model Detection**: Supports YOLOE C4ISR (default), RT-DETR, YOLOE, SAM2, and Moondream models.
 * **NATS JetStream Bridge**: Seamlessly bridges detection events to NATS subjects.
+* **Video Frame Streaming**: Stream JPEG-encoded video frames to NATS JetStream for live viewing and recording.
 * **Device Fingerprinting**: Automatically identifies cameras and generates unique device IDs.
 * **KV State Sync**: Synchronizes consolidated EntityState to NATS Key-Value stores.
 * **Smart Publishing**: Reduces event noise by 90%+ via movement/confidence thresholds.
 * **C4ISR Threat Intelligence**: 4-level threat classification with aggregated threat summaries.
+* **Token-Based Authentication**: Secure NATS connections with token authentication.
 
 ## Architecture
 
@@ -67,6 +69,11 @@ sequenceDiagram
         alt Persistent Object (min_frames reached)
             Client->>KV: Update EntityState<br/>(key: {entity_id})
             KV-->>Client: ACK
+        end
+
+        alt Frame Streaming Enabled
+            Client->>Client: Encode frame (JPEG)
+            Client->>NATS: Publish video frame<br/>(constellation.video.{org}.{entity})
         end
 
         Client->>Client: Display annotated video
@@ -221,9 +228,17 @@ cp .env.example .env
 | **Constellation Integration** | | |
 | `CONSTELLATION_ORG_ID` | (required) | Organization ID from Overwatch |
 | `CONSTELLATION_ENTITY_ID` | (required) | Entity ID from Overwatch |
+| **NATS Authentication** | | |
+| `NATS_AUTH_TOKEN` | (optional) | Token for NATS authentication |
 | **Smart Publishing** | | |
 | `SIGINT_MOVEMENT_THRESHOLD` | 0.05 | Movement threshold (5%) to trigger publish |
 | `SIGINT_CONFIDENCE_THRESHOLD` | 0.1 | Confidence change (10%) to trigger publish |
+| **Video Frame Streaming** | | |
+| `ENABLE_FRAME_STREAMING` | false | Enable streaming frames to NATS |
+| `FRAME_TARGET_FPS` | 15 | Target FPS for frame streaming |
+| `FRAME_JPEG_QUALITY` | 75 | JPEG encoding quality (1-100) |
+| `FRAME_MAX_DIMENSION` | 1280 | Max frame dimension in pixels |
+| `FRAME_INCLUDE_DETECTIONS` | true | Include detection overlays in frames |
 | **Model Loading** | | |
 | `HF_HUB_OFFLINE` | 0 | Skip HuggingFace online checks (use cached) |
 | `TRANSFORMERS_OFFLINE` | 0 | Skip transformer library online checks |
@@ -259,6 +274,7 @@ vision2constellation/
 │       ├── args.py             # CLI argument parsing
 │       ├── device.py           # Device fingerprinting
 │       ├── constellation.py    # Constellation ID management
+│       ├── frame_encoder.py    # Video frame encoding for streaming
 │       └── signals.py          # Signal handlers
 ├── docs/                       # Documentation
 │   ├── DETECTION_PAYLOAD_STANDARD.md
@@ -280,19 +296,89 @@ vision2constellation/
 ```
 constellation.events.isr.{organization_id}.{entity_id}
                     └── Detection events, bootsequence, shutdown
+
+constellation.video.{organization_id}.{entity_id}
+                    └── Video frame stream (JPEG binary)
 ```
 
 ### JetStream Streams
 
-| Stream | Subjects | Purpose |
-|--------|----------|---------|
-| `CONSTELLATION_EVENTS` | `constellation.events.>` | All system events |
+| Stream | Subjects | Storage | Purpose |
+|--------|----------|---------|---------|
+| `CONSTELLATION_EVENTS` | `constellation.events.>` | File | All system events |
+| `CONSTELLATION_VIDEO_FRAMES` | `constellation.video.>` | Memory | Video frame streaming |
+
+### Video Stream Configuration
+
+The video stream is optimized for live streaming with the following defaults:
+
+| Setting | Value | Description |
+|---------|-------|-------------|
+| Storage | Memory | Low latency, not persisted |
+| Max Age | 30 seconds | Rolling buffer for live viewing |
+| Max Bytes | 512MB | ~500 frames at 1MB each |
+| Max Msg Size | 2MB | Generous for 1080p JPEG |
+| Discard | Old | Drop oldest frames when full |
 
 ### KV Store
 
 | Key Pattern | Purpose |
 |-------------|---------|
 | `{entity_id}` | Consolidated EntityState (detections, analytics, c4isr) |
+
+## Video Frame Streaming
+
+Enable real-time video streaming to your backend by setting `ENABLE_FRAME_STREAMING=true` in your `.env` file.
+
+### Frame Message Format
+
+Video frames are published as binary JPEG data with metadata in headers:
+
+| Header | Description |
+|--------|-------------|
+| `Content-Type` | `image/jpeg` |
+| `Frame-Number` | Sequential frame number |
+| `Timestamp` | ISO 8601 UTC timestamp |
+| `Width` / `Height` | Encoded frame dimensions |
+| `Original-Width` / `Original-Height` | Source frame dimensions |
+| `Detection-Count` | Number of detections in frame |
+| `Device-ID` | Device fingerprint |
+| `Org-ID` / `Entity-ID` | Constellation identifiers |
+
+### Consuming Frames (Python Example)
+
+```python
+import nats
+from nats.js.api import ConsumerConfig, DeliverPolicy, AckPolicy
+
+async def consume_video_frames():
+    nc = await nats.connect("nats://localhost:4222", token="your-token")
+    js = nc.jetstream()
+
+    # Subscribe to live frames (ephemeral consumer)
+    sub = await js.subscribe(
+        "constellation.video.{org_id}.{entity_id}",
+        stream="CONSTELLATION_VIDEO_FRAMES",
+        config=ConsumerConfig(
+            deliver_policy=DeliverPolicy.NEW,
+            ack_policy=AckPolicy.NONE,
+        ),
+    )
+
+    async for msg in sub.messages:
+        frame_bytes = msg.data  # Raw JPEG bytes
+        frame_num = msg.headers.get("Frame-Number")
+        detection_count = msg.headers.get("Detection-Count")
+        # Process frame...
+```
+
+### Bandwidth Estimates
+
+| Resolution | Quality | Size/Frame | @ 15 FPS |
+|------------|---------|------------|----------|
+| 1280x720 | 75% | ~80-150KB | ~1.2-2.2 MB/s |
+| 1920x1080 | 75% | ~150-300KB | ~2.2-4.5 MB/s |
+| 1280x720 | 50% | ~40-80KB | ~0.6-1.2 MB/s |
 
 ## Detection Payload Format
 
