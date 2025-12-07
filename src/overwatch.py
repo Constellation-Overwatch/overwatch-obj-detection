@@ -29,7 +29,7 @@ from typing import Any
 
 from .config.models import DetectionMode, get_default_mode
 from .config.defaults import DEFAULT_CONFIG
-from .utils.frame_encoder import encode_frame, calculate_frame_interval
+from .utils.frame_encoder import calculate_frame_interval
 from .utils.args import parse_arguments, validate_arguments
 from .utils.device import get_device_fingerprint
 from .utils.signals import setup_signal_handlers
@@ -161,10 +161,16 @@ class OverwatchOrchestrator:
 
         # Frame streaming info
         if self.frame_stream_config["enabled"]:
-            print(f"\nFrame Streaming: ENABLED")
+            codec = self.frame_stream_config.get("codec", "h264").upper()
+            print(f"\nFrame Streaming: ENABLED ({codec})")
             print(f"  Target FPS: {self.frame_stream_config['target_fps']}")
-            print(f"  JPEG Quality: {self.frame_stream_config['jpeg_quality']}")
-            print(f"  Max Dimension: {self.frame_stream_config['max_dimension']}px")
+            if codec == "H264":
+                print(f"  Resolution: {self.frame_stream_config.get('h264_width', 1280)}x{self.frame_stream_config.get('h264_height', 720)}")
+                print(f"  Bitrate: {self.frame_stream_config.get('h264_bitrate', '1500k')}")
+                print(f"  Container: MPEG-TS (WebRTC compatible)")
+            else:
+                print(f"  JPEG Quality: {self.frame_stream_config['jpeg_quality']}")
+                print(f"  Max Dimension: {self.frame_stream_config['max_dimension']}px")
             print(f"  Include Detections: {self.frame_stream_config['include_detections']}")
         else:
             print(f"\nFrame Streaming: DISABLED (set ENABLE_FRAME_STREAMING=true to enable)")
@@ -271,18 +277,11 @@ class OverwatchOrchestrator:
                         # Choose frame to stream (with or without detections overlay)
                         frame_to_stream = processed_frame if self.frame_stream_config["include_detections"] else frame
 
-                        # Encode and publish frame
-                        frame_bytes, frame_metadata = encode_frame(
-                            frame_to_stream,
-                            jpeg_quality=self.frame_stream_config["jpeg_quality"],
-                            max_dimension=self.frame_stream_config["max_dimension"]
-                        )
-
+                        # Publish frame (H.264/MPEG-TS or JPEG based on config)
                         await self.communication.publish_frame(
-                            frame_bytes=frame_bytes,
+                            frame=frame_to_stream,
                             frame_number=frame_count,
                             timestamp=frame_timestamp,
-                            metadata=frame_metadata,
                             detection_count=len(detections)
                         )
 
@@ -313,7 +312,11 @@ class OverwatchOrchestrator:
         if self.communication:
             frame_stats = self.communication.get_frame_stream_stats()
             if frame_stats["enabled"]:
-                print(f"Frames streamed: {frame_stats['frames_published']}")
+                print(f"Frames streamed: {frame_stats['frames_published']} ({frame_stats.get('codec', 'unknown').upper()})")
+                if "h264" in frame_stats:
+                    h264 = frame_stats["h264"]
+                    mb_encoded = h264.get("bytes_encoded", 0) / (1024 * 1024)
+                    print(f"  H.264 data: {mb_encoded:.2f} MB @ {h264.get('avg_bitrate_kbps', 0):.0f} kbps")
 
         print("=" * 35)
     

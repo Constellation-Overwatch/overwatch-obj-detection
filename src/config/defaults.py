@@ -41,12 +41,19 @@ OPENCV_CONFIG = {
 # Video frame streaming configuration
 FRAME_STREAM_CONFIG = {
     "enabled": os.getenv("ENABLE_FRAME_STREAMING", "false").lower() == "true",
-    "jpeg_quality": int(os.getenv("FRAME_JPEG_QUALITY", "75")),
+    "codec": os.getenv("FRAME_CODEC", "h264"),  # "h264" (default) or "jpeg"
     "target_fps": int(os.getenv("FRAME_TARGET_FPS", "15")),
-    "max_dimension": int(os.getenv("FRAME_MAX_DIMENSION", "1280")),
     "include_detections": os.getenv("FRAME_INCLUDE_DETECTIONS", "true").lower() == "true",
     "stream_name": os.getenv("NATS_VIDEO_STREAM_NAME", "CONSTELLATION_VIDEO_FRAMES"),
     "subject_root": os.getenv("NATS_VIDEO_SUBJECT_ROOT", "constellation.video"),
+    # H.264/MPEG-TS settings (WebRTC optimized - default)
+    "h264_width": int(os.getenv("FRAME_H264_WIDTH", "1280")),
+    "h264_height": int(os.getenv("FRAME_H264_HEIGHT", "720")),
+    "h264_bitrate": os.getenv("FRAME_H264_BITRATE", "1500k"),
+    "h264_gop_size": int(os.getenv("FRAME_H264_GOP_SIZE", "30")),
+    # JPEG fallback settings (legacy)
+    "jpeg_quality": int(os.getenv("FRAME_JPEG_QUALITY", "75")),
+    "max_dimension": int(os.getenv("FRAME_MAX_DIMENSION", "1280")),
 }
 
 # Environment setup

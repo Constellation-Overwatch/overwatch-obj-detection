@@ -1,12 +1,10 @@
 """SAM2 segmentation implementation."""
 
-import os
-import shutil
 import numpy as np
 import cv2
 from typing import List, Dict, Any, Tuple
 
-from .base import BaseDetector
+from .base import BaseDetector, load_ultralytics_model
 
 class SAM2Detector(BaseDetector):
     """SAM2 automatic mask generation segmentation."""
@@ -25,50 +23,19 @@ class SAM2Detector(BaseDetector):
     async def load_model(self) -> None:
         """Load SAM2 model."""
         from ultralytics import SAM
-        
+
         print("Loading SAM2 model...")
         print("NOTE: Using SAM2-B model for segmentation\n")
-        
-        # Setup model path
-        script_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-        models_dir = os.path.join(script_dir, "models")
-        model_path = os.path.join(models_dir, self.model_config.model_file)
-        
-        os.makedirs(models_dir, exist_ok=True)
-        
-        # Download model if needed
-        if not os.path.exists(model_path):
-            print(f"Model not found at {model_path}")
-            print("Downloading SAM2-B model...")
-            temp_model = SAM(self.model_config.model_file)
-            default_model_path = os.path.expanduser(f"~/.ultralytics/weights/{self.model_config.model_file}")
-            if os.path.exists(default_model_path):
-                shutil.copy(default_model_path, model_path)
-                print(f"Model cached to: {model_path}")
-            else:
-                # Try alternative paths
-                alt_paths = [
-                    os.path.expanduser("~/.cache/ultralytics/weights/sam2_b.pt"),
-                    os.path.join(os.getcwd(), "sam2_b.pt")
-                ]
-                for alt_path in alt_paths:
-                    if os.path.exists(alt_path):
-                        shutil.copy(alt_path, model_path)
-                        print(f"Model cached to: {model_path} (from {alt_path})")
-                        break
-        
-        # Load model
-        if os.path.exists(model_path):
-            print(f"Loading model from: {model_path}")
-            self.model = SAM(model_path)
-            print(f"✓ SAM2 model loaded successfully")
-            print(f"  Mode: Automatic mask generation (no prompts)")
-            print(f"  Confidence threshold: {self.confidence_threshold}")
-            print(f"  Image size: {self.imgsz}")
-            print()
-        else:
-            print(f"Error: Could not load SAM2 model")
-            raise RuntimeError("Failed to load SAM2 model")
+        self.model = load_ultralytics_model(
+            SAM,
+            self.model_config.model_file,
+            "SAM2"
+        )
+        print(f"✓ SAM2 model loaded successfully")
+        print(f"  Mode: Automatic mask generation (no prompts)")
+        print(f"  Confidence threshold: {self.confidence_threshold}")
+        print(f"  Image size: {self.imgsz}")
+        print()
     
     def process_frame(self, frame: Any, frame_timestamp: str, 
                      frame_count: int) -> Tuple[List[Dict[str, Any]], Any]:

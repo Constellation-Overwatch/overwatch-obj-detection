@@ -1,11 +1,9 @@
 """RT-DETR object detection implementation."""
 
-import os
-import shutil
 import numpy as np
 from typing import List, Dict, Any, Tuple
 
-from .base import BaseDetector
+from .base import BaseDetector, load_ultralytics_model
 
 # Detection category colors (aligned with C4ISR styling)
 DETECTION_CATEGORIES = {
@@ -47,36 +45,16 @@ class RTDETRDetector(BaseDetector):
     async def load_model(self) -> None:
         """Load RT-DETR model."""
         from ultralytics import RTDETR
-        
+
         print("Loading RT-DETR model...")
-        
-        # Setup model path
-        script_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-        models_dir = os.path.join(script_dir, "models")
-        model_path = os.path.join(models_dir, self.model_config.model_file)
-        
-        os.makedirs(models_dir, exist_ok=True)
-        
-        # Download model if needed
-        if not os.path.exists(model_path):
-            print(f"Model not found at {model_path}")
-            print("Downloading RT-DETR-l model...")
-            temp_model = RTDETR(self.model_config.model_file)
-            default_model_path = os.path.expanduser(f"~/.ultralytics/weights/{self.model_config.model_file}")
-            if os.path.exists(default_model_path):
-                shutil.copy(default_model_path, model_path)
-                print(f"Model saved to: {model_path}")
-        
-        # Load model
-        if os.path.exists(model_path):
-            print(f"Loading model from: {model_path}")
-            self.model = RTDETR(model_path)
-            print(f"✓ RT-DETR model loaded successfully")
-            print(f"  Confidence threshold: {self.confidence_threshold}")
-            print()
-        else:
-            print(f"Error: Could not load RT-DETR model")
-            raise RuntimeError("Failed to load RT-DETR model")
+        self.model = load_ultralytics_model(
+            RTDETR,
+            self.model_config.model_file,
+            "RT-DETR"
+        )
+        print(f"✓ RT-DETR model loaded successfully")
+        print(f"  Confidence threshold: {self.confidence_threshold}")
+        print()
     
     def process_frame(self, frame: Any, frame_timestamp: str,
                      frame_count: int) -> Tuple[List[Dict[str, Any]], Any]:

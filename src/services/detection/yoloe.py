@@ -1,11 +1,9 @@
 """YOLOE object tracking implementation."""
 
-import os
-import shutil
 import numpy as np
 from typing import List, Dict, Any, Tuple, Set
 
-from .base import BaseDetector
+from .base import BaseDetector, load_ultralytics_model
 
 class YOLOEDetector(BaseDetector):
     """YOLOE object detection with tracking capabilities."""
@@ -24,37 +22,17 @@ class YOLOEDetector(BaseDetector):
     async def load_model(self) -> None:
         """Load YOLOE model with tracking capabilities."""
         from ultralytics import YOLOE
-        
+
         print("Loading YOLOE model...")
-        
-        # Setup model path
-        script_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-        models_dir = os.path.join(script_dir, "models")
-        model_path = os.path.join(models_dir, self.model_config.model_file)
-        
-        os.makedirs(models_dir, exist_ok=True)
-        
-        # Download model if needed
-        if not os.path.exists(model_path):
-            print(f"Model not found at {model_path}")
-            print("Downloading YOLOE-11L-SEG model...")
-            temp_model = YOLOE(self.model_config.model_file)
-            default_model_path = os.path.expanduser(f"~/.ultralytics/weights/{self.model_config.model_file}")
-            if os.path.exists(default_model_path):
-                shutil.copy(default_model_path, model_path)
-                print(f"Model saved to: {model_path}")
-        
-        # Load model
-        if os.path.exists(model_path):
-            print(f"Loading model from: {model_path}")
-            self.model = YOLOE(model_path)
-            print(f"✓ YOLOE model loaded successfully with {self.tracker} tracker")
-            print(f"  Confidence threshold: {self.confidence_threshold}")
-            print(f"  Tracker: {self.tracker.replace('.yaml', '').upper()}")
-            print()
-        else:
-            print(f"Error: Could not load YOLOE model")
-            raise RuntimeError("Failed to load YOLOE model")
+        self.model = load_ultralytics_model(
+            YOLOE,
+            self.model_config.model_file,
+            "YOLOE"
+        )
+        print(f"✓ YOLOE model loaded successfully with {self.tracker} tracker")
+        print(f"  Confidence threshold: {self.confidence_threshold}")
+        print(f"  Tracker: {self.tracker.replace('.yaml', '').upper()}")
+        print()
     
     def process_frame(self, frame: Any, frame_timestamp: str, 
                      frame_count: int) -> Tuple[List[Dict[str, Any]], Any]:

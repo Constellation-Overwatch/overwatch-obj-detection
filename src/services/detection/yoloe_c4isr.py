@@ -3,9 +3,8 @@
 import os
 import shutil
 from typing import List, Dict, Any, Tuple
-from datetime import datetime, timezone
 
-from .base import BaseDetector
+from .base import BaseDetector, load_ultralytics_model, get_models_dir
 from ...config.threats import ALL_CLASSES, CLASS_TO_THREAT_LEVEL, THREAT_CATEGORIES, add_custom_threat_class
 
 class C4ISRThreatDetector(BaseDetector):
@@ -28,45 +27,32 @@ class C4ISRThreatDetector(BaseDetector):
     async def load_model(self) -> None:
         """Load YOLOE model with C4ISR threat prompts."""
         from ultralytics import YOLOE
-        
+
         print("="*70)
         print("C4ISR THREAT DETECTION INITIALIZATION")
         print("="*70)
         print("Loading YOLOE model with open-vocabulary threat prompts...\n")
-        
-        # Setup model path
-        script_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-        models_dir = os.path.join(script_dir, "models")
-        model_path = os.path.join(models_dir, self.model_config.model_file)
-        
-        os.makedirs(models_dir, exist_ok=True)
-        
-        # Download model if needed
-        if not os.path.exists(model_path):
-            print(f"Model not found at {model_path}")
-            print("Downloading YOLOE-11L-SEG model...")
-            temp_model = YOLOE(self.model_config.model_file)
-            default_model_path = os.path.expanduser(f"~/.ultralytics/weights/{self.model_config.model_file}")
-            if os.path.exists(default_model_path):
-                shutil.copy(default_model_path, model_path)
-        
-        # Load model
-        if os.path.exists(model_path):
-            print(f"Loading model from: {model_path}")
-            self.model = YOLOE(model_path)
-            print(f"✓ YOLOE model loaded successfully")
-        else:
-            print(f"Error: Could not load model")
-            raise RuntimeError("Failed to load YOLOE model")
-        
+
+        # Load model using shared utility
+        self.model = load_ultralytics_model(
+            YOLOE,
+            self.model_config.model_file,
+            "YOLOE"
+        )
+        print(f"✓ YOLOE model loaded successfully")
+
         # Setup MobileClip text encoder
+        models_dir = get_models_dir()
         await self._setup_mobileclip(models_dir)
-        
-        # Configure text prompts
+
+        # Configure text prompts (this may trigger MobileClip download)
         print(f"Setting text prompts for YOLOE...")
         text_embeddings = self.model.get_text_pe(ALL_CLASSES)
         self.model.set_classes(ALL_CLASSES, text_embeddings)
         print(f"✓ Text prompts configured for {len(ALL_CLASSES)} classes")
+
+        # Move MobileClip to ./models/ if it was downloaded to CWD during get_text_pe()
+        await self._cleanup_mobileclip_download(models_dir)
         
         # Print threat categories
         print(f"\nThreat Categories:")
@@ -80,22 +66,39 @@ class C4ISRThreatDetector(BaseDetector):
     
     async def _setup_mobileclip(self, models_dir: str):
         """Setup MobileClip text encoder."""
-        mobileclip_local = os.path.join(models_dir, "mobileclip_blt.ts")
-        mobileclip_cache = os.path.expanduser("~/.ultralytics/weights/mobileclip_blt.ts")
-        
+        mobileclip_filename = "mobileclip_blt.ts"
+        mobileclip_local = os.path.join(models_dir, mobileclip_filename)
+        mobileclip_cache = os.path.expanduser(f"~/.ultralytics/weights/{mobileclip_filename}")
+        mobileclip_cwd = os.path.join(os.getcwd(), mobileclip_filename)
+
         # Ensure cache directory exists
         os.makedirs(os.path.dirname(mobileclip_cache), exist_ok=True)
-        
-        # Handle MobileClip placement
+
+        # Check if MobileClip was downloaded to CWD and move it to ./models/
+        if os.path.exists(mobileclip_cwd) and not os.path.exists(mobileclip_local):
+            shutil.move(mobileclip_cwd, mobileclip_local)
+            print(f"✓ MobileClip moved to {mobileclip_local}")
+
+        # Handle MobileClip placement (sync between local and cache)
         if os.path.exists(mobileclip_local) and not os.path.exists(mobileclip_cache):
             shutil.copy(mobileclip_local, mobileclip_cache)
-            print(f"✓ MobileClip available at {mobileclip_cache}")
+            print(f"✓ MobileClip synced to {mobileclip_cache}")
         elif os.path.exists(mobileclip_cache) and not os.path.exists(mobileclip_local):
             shutil.copy(mobileclip_cache, mobileclip_local)
-            print(f"✓ MobileClip available at {mobileclip_local}")
-        elif not os.path.exists(mobileclip_cache):
-            print(f"MobileClip will download on first use to {mobileclip_cache}")
-    
+            print(f"✓ MobileClip synced to {mobileclip_local}")
+        elif not os.path.exists(mobileclip_local) and not os.path.exists(mobileclip_cache):
+            print(f"MobileClip will download on first use (will be moved to {mobileclip_local})")
+
+    async def _cleanup_mobileclip_download(self, models_dir: str):
+        """Move MobileClip from CWD to ./models/ if it was downloaded there."""
+        mobileclip_filename = "mobileclip_blt.ts"
+        mobileclip_local = os.path.join(models_dir, mobileclip_filename)
+        mobileclip_cwd = os.path.join(os.getcwd(), mobileclip_filename)
+
+        if os.path.exists(mobileclip_cwd) and not os.path.exists(mobileclip_local):
+            shutil.move(mobileclip_cwd, mobileclip_local)
+            print(f"✓ MobileClip moved to {mobileclip_local}")
+
     def process_frame(self, frame: Any, frame_timestamp: str,
                      frame_count: int) -> Tuple[List[Dict[str, Any]], Any]:
         """Process frame with YOLOE C4ISR threat detection."""

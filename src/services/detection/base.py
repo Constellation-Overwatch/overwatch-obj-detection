@@ -1,9 +1,85 @@
 """Base detector class for all detection models."""
 
+import os
 from abc import ABC, abstractmethod
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Callable
 from argparse import Namespace
 from ..tracking_id import TrackingIDService
+
+
+def get_models_dir() -> str:
+    """Get the project's ./models directory path."""
+    # Navigate from src/services/detection/ to project root
+    script_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    return os.path.join(script_dir, "models")
+
+
+def configure_ultralytics_weights_dir(models_dir: str) -> None:
+    """Configure ultralytics to download weights to the specified directory."""
+    from ultralytics import settings
+    settings.update({"weights_dir": models_dir})
+
+
+def load_ultralytics_model(
+    model_class: Callable,
+    model_file: str,
+    model_name: str = "model"
+) -> Any:
+    """
+    Load an ultralytics model, downloading to ./models if needed.
+
+    Args:
+        model_class: The ultralytics model class (RTDETR, YOLOE, SAM, etc.)
+        model_file: The model filename (e.g., "rtdetr-l.pt")
+        model_name: Display name for logging
+
+    Returns:
+        Loaded model instance
+    """
+    import shutil
+
+    models_dir = get_models_dir()
+    model_path = os.path.join(models_dir, model_file)
+
+    os.makedirs(models_dir, exist_ok=True)
+
+    # Configure ultralytics to download weights to ./models directory
+    configure_ultralytics_weights_dir(models_dir)
+
+    # Load model if it exists in ./models
+    if os.path.exists(model_path):
+        print(f"Loading model from: {model_path}")
+        return model_class(model_path)
+
+    # Model doesn't exist - need to download
+    print(f"Model not found at {model_path}")
+    print(f"Downloading {model_name}...")
+
+    # Load model (this triggers download)
+    model = model_class(model_file)
+
+    # Check if model was downloaded to CWD and move it to ./models/
+    cwd_model_path = os.path.join(os.getcwd(), model_file)
+    if os.path.exists(cwd_model_path) and cwd_model_path != model_path:
+        shutil.move(cwd_model_path, model_path)
+        print(f"Model moved to: {model_path}")
+        # Reload from correct location
+        return model_class(model_path)
+
+    # Check other possible download locations
+    alt_paths = [
+        os.path.expanduser(f"~/.ultralytics/weights/{model_file}"),
+        os.path.expanduser(f"~/.cache/ultralytics/weights/{model_file}"),
+    ]
+    for alt_path in alt_paths:
+        if os.path.exists(alt_path) and alt_path != model_path:
+            shutil.move(alt_path, model_path)
+            print(f"Model moved to: {model_path}")
+            return model_class(model_path)
+
+    print(f"✓ Model downloaded to: {models_dir}")
+    return model
+
 
 class BaseDetector(ABC):
     """Abstract base class for all detection models."""
@@ -17,7 +93,7 @@ class BaseDetector(ABC):
         # Initialize centralized tracking ID service
         self.tracking_id_service = TrackingIDService()
         self.model_type = self.model_config.name  # e.g., "yoloe-c4isr-threat-detection"
-        
+
     @abstractmethod
     async def load_model(self) -> None:
         """Load the detection model."""
