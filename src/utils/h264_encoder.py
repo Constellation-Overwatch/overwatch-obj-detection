@@ -1,27 +1,44 @@
 """H.264 video encoder for WebRTC-compatible streaming via FFmpeg.
 
-Outputs MPEG-TS format optimized for WebRTC ingestion:
-- libx264 codec with baseline profile (browser compatible)
-- ultrafast preset + zerolatency tune (real-time control)
-- MPEG-TS container (what WebRTCHandler expects)
+Optimized MPEG-TS output for NATS JetStream → WebRTC pipeline:
+- libx264 baseline profile (universal browser support)
+- ultrafast preset + zerolatency tune (minimal latency)
+- UDP-friendly chunk sizes (7 × 188 = 1316 bytes)
+- Continuous keyframe-aware streaming
 
-Bandwidth: ~0.15-0.3 MB/s vs ~1.5-2.5 MB/s for MJPEG (~90% savings)
+Bandwidth: ~150-300 KB/s vs ~1.5-2.5 MB/s for MJPEG (~90% savings)
 """
 
 import subprocess
 import threading
 import queue
 import numpy as np
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple, Optional, List
+from dataclasses import dataclass
 import time
+
+
+@dataclass
+class EncodedChunk:
+    """MPEG-TS chunk with metadata."""
+    data: bytes
+    sequence: int
+    is_keyframe: bool
+    pts: int  # Presentation timestamp
 
 
 class H264Encoder:
     """
-    Streaming H.264 encoder using FFmpeg subprocess pipe.
+    Streaming H.264 encoder using persistent FFmpeg subprocess.
 
-    Publishes MPEG-TS chunks continuously for real-time streaming.
+    Designed for real-time OpenCV → NATS → WebRTC pipeline.
     """
+
+    # MPEG-TS packet size
+    TS_PACKET_SIZE = 188
+    # Optimal chunk: 7 packets fits in UDP datagram
+    CHUNK_PACKETS = 7
+    CHUNK_SIZE = TS_PACKET_SIZE * CHUNK_PACKETS  # 1316 bytes
 
     def __init__(
         self,
@@ -38,44 +55,66 @@ class H264Encoder:
         self.gop_size = gop_size
 
         self._process: Optional[subprocess.Popen] = None
-        self._output_queue: queue.Queue = queue.Queue(maxsize=60)
+        self._output_queue: queue.Queue[EncodedChunk] = queue.Queue(maxsize=120)
         self._reader_thread: Optional[threading.Thread] = None
         self._running = False
+
+        # Stats
         self._frame_count = 0
+        self._chunk_sequence = 0
         self._bytes_encoded = 0
         self._start_time: Optional[float] = None
         self._input_resolution: Tuple[int, int] = (0, 0)
 
+        # Keyframe tracking (GOP-based estimation)
+        self._last_keyframe_sequence = 0
+
     def start(self, input_width: int, input_height: int) -> bool:
-        """Start FFmpeg encoder process."""
+        """Start FFmpeg encoder process with optimized settings."""
         if self._running:
             return True
 
         self._input_resolution = (input_width, input_height)
 
+        # Build optimized FFmpeg command
         cmd = [
             "ffmpeg",
             "-y",
             "-hide_banner",
             "-loglevel", "error",
-            # Input: raw BGR frames from OpenCV via stdin
+            # Input: raw BGR24 frames from OpenCV
             "-f", "rawvideo",
             "-vcodec", "rawvideo",
             "-pix_fmt", "bgr24",
             "-s", f"{input_width}x{input_height}",
             "-r", str(self.fps),
-            "-i", "-",
-            # H.264 encoding (WebRTC optimized)
+            "-i", "pipe:0",
+            # Video filter: scale to output resolution
+            "-vf", f"scale={self.width}:{self.height}:flags=fast_bilinear",
+            # H.264 encoding - WebRTC optimized
             "-c:v", "libx264",
             "-preset", "ultrafast",
             "-tune", "zerolatency",
             "-profile:v", "baseline",
+            "-level", "3.1",
             "-pix_fmt", "yuv420p",
+            # Bitrate control
             "-b:v", self.bitrate,
+            "-maxrate", self.bitrate,
+            "-bufsize", f"{int(self.bitrate.replace('k', '000')) // 2}",
+            # GOP structure - keyframe every N frames
             "-g", str(self.gop_size),
-            # Output: MPEG-TS to stdout
+            "-keyint_min", str(self.gop_size),
+            "-sc_threshold", "0",
+            # Disable B-frames for lower latency
+            "-bf", "0",
+            # MPEG-TS muxer settings
             "-f", "mpegts",
-            "-",
+            "-mpegts_flags", "resend_headers",
+            "-muxrate", "0",  # Variable bitrate
+            "-pcr_period", "20",
+            # Output to stdout
+            "pipe:1",
         ]
 
         try:
@@ -89,120 +128,143 @@ class H264Encoder:
             self._running = True
             self._start_time = time.monotonic()
             self._frame_count = 0
+            self._chunk_sequence = 0
             self._bytes_encoded = 0
 
-            # Background thread reads MPEG-TS output
-            self._reader_thread = threading.Thread(target=self._read_output, daemon=True)
+            # Start background reader thread
+            self._reader_thread = threading.Thread(
+                target=self._read_output_loop,
+                daemon=True,
+                name="H264EncoderReader"
+            )
             self._reader_thread.start()
 
             return True
 
         except FileNotFoundError:
-            print("Error: FFmpeg not found. Install with: brew install ffmpeg")
+            print("Error: FFmpeg not found. Install: brew install ffmpeg")
             return False
         except Exception as e:
             print(f"Error starting H.264 encoder: {e}")
             return False
 
-    def _read_output(self) -> None:
-        """Read MPEG-TS chunks from FFmpeg stdout."""
-        # MPEG-TS packet size is 188 bytes
-        # Optimal: 7 * 188 = 1316 bytes (fits in single UDP datagram)
-        # Higher throughput: 20 * 188 = 3760 bytes
-        chunk_size = 188 * 7  # UDP-friendly chunk size
-
-        while self._running and self._process:
+    def _read_output_loop(self) -> None:
+        """Background thread: read MPEG-TS chunks from FFmpeg."""
+        while self._running and self._process and self._process.stdout:
             try:
-                chunk = self._process.stdout.read(chunk_size)
-                if chunk:
-                    self._bytes_encoded += len(chunk)
+                chunk_data = self._process.stdout.read(self.CHUNK_SIZE)
+                if not chunk_data:
+                    if self._process.poll() is not None:
+                        break
+                    continue
+
+                self._chunk_sequence += 1
+                self._bytes_encoded += len(chunk_data)
+
+                # Estimate keyframe based on GOP
+                frames_since_keyframe = self._frame_count % self.gop_size
+                is_keyframe = frames_since_keyframe == 0 or self._frame_count <= 1
+
+                chunk = EncodedChunk(
+                    data=chunk_data,
+                    sequence=self._chunk_sequence,
+                    is_keyframe=is_keyframe,
+                    pts=int(self._frame_count * (90000 / self.fps)),  # 90kHz PTS
+                )
+
+                # Non-blocking put with overflow handling
+                try:
+                    self._output_queue.put_nowait(chunk)
+                except queue.Full:
+                    # Drop oldest chunk (real-time priority)
                     try:
+                        self._output_queue.get_nowait()
                         self._output_queue.put_nowait(chunk)
-                    except queue.Full:
-                        # Drop oldest chunk if queue full (real-time priority)
-                        try:
-                            self._output_queue.get_nowait()
-                            self._output_queue.put_nowait(chunk)
-                        except queue.Empty:
-                            pass
-                elif self._process.poll() is not None:
-                    break
+                    except queue.Empty:
+                        pass
+
             except Exception:
+                if self._running:
+                    continue
                 break
 
-    def encode_frame(self, frame: np.ndarray) -> Tuple[Optional[bytes], Dict[str, Any]]:
+    def encode_frame(self, frame: np.ndarray) -> Tuple[List[EncodedChunk], Dict[str, Any]]:
         """
-        Write frame to encoder, return any available MPEG-TS output.
+        Feed frame to encoder and collect available MPEG-TS chunks.
 
         Args:
             frame: BGR numpy array from OpenCV
 
         Returns:
-            (mpegts_bytes or None, metadata_dict)
+            (list of EncodedChunks, metadata dict)
         """
         h, w = frame.shape[:2]
 
-        # Start encoder on first frame or if resolution changed
+        # Start or restart encoder if needed
         if not self._running or (w, h) != self._input_resolution:
             if self._running:
                 self.stop()
             if not self.start(w, h):
-                return None, {"error": "Failed to start encoder"}
+                return [], {"error": "Failed to start encoder"}
+
+        metadata = {
+            "width": self.width,
+            "height": self.height,
+            "original_width": w,
+            "original_height": h,
+            "format": "h264",
+            "container": "mpegts",
+            "profile": "baseline",
+            "bitrate": self.bitrate,
+            "fps": self.fps,
+            "gop_size": self.gop_size,
+        }
 
         try:
-            # Feed frame to FFmpeg
-            self._process.stdin.write(frame.tobytes())
+            # Write frame to FFmpeg stdin
+            frame_bytes = frame.tobytes()
+            self._process.stdin.write(frame_bytes)
             self._process.stdin.flush()
             self._frame_count += 1
 
-            # Collect available MPEG-TS output
-            chunks = []
+            # Collect all available chunks
+            chunks: List[EncodedChunk] = []
             while True:
                 try:
                     chunks.append(self._output_queue.get_nowait())
                 except queue.Empty:
                     break
 
-            mpegts_bytes = b"".join(chunks) if chunks else None
+            metadata["frame_number"] = self._frame_count
+            metadata["chunks_produced"] = len(chunks)
+            metadata["total_bytes"] = sum(len(c.data) for c in chunks)
 
-            metadata = {
-                "width": self.width,
-                "height": self.height,
-                "original_width": w,
-                "original_height": h,
-                "format": "h264",
-                "container": "mpegts",
-                "profile": "baseline",
-                "preset": "ultrafast",
-                "bitrate": self.bitrate,
-                "fps": self.fps,
-                "frame_number": self._frame_count,
-                "size_bytes": len(mpegts_bytes) if mpegts_bytes else 0,
-            }
-
-            return mpegts_bytes, metadata
+            return chunks, metadata
 
         except BrokenPipeError:
             self._running = False
-            return None, {"error": "Encoder pipe broken"}
+            return [], {"error": "Encoder pipe broken"}
         except Exception as e:
-            return None, {"error": str(e)}
+            return [], {"error": str(e)}
 
     def get_stats(self) -> Dict[str, Any]:
         """Get encoder statistics."""
         elapsed = time.monotonic() - self._start_time if self._start_time else 0
         return {
             "frames_encoded": self._frame_count,
+            "chunks_produced": self._chunk_sequence,
             "bytes_encoded": self._bytes_encoded,
-            "elapsed_seconds": elapsed,
-            "avg_fps": self._frame_count / elapsed if elapsed > 0 else 0,
-            "avg_bitrate_kbps": (self._bytes_encoded * 8 / 1000) / elapsed if elapsed > 0 else 0,
+            "elapsed_seconds": round(elapsed, 2),
+            "avg_fps": round(self._frame_count / elapsed, 1) if elapsed > 0 else 0,
+            "avg_bitrate_kbps": round((self._bytes_encoded * 8 / 1000) / elapsed, 1) if elapsed > 0 else 0,
             "resolution": f"{self.width}x{self.height}",
+            "input_resolution": f"{self._input_resolution[0]}x{self._input_resolution[1]}",
             "running": self._running,
+            "queue_size": self._output_queue.qsize(),
         }
 
     def stop(self) -> None:
-        """Stop encoder process."""
+        """Stop encoder process gracefully."""
         self._running = False
 
         if self._process:
@@ -215,11 +277,12 @@ class H264Encoder:
                 self._process.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 self._process.kill()
+                self._process.wait(timeout=1)
             except Exception:
                 pass
             self._process = None
 
-        # Drain queue
+        # Drain remaining chunks
         while not self._output_queue.empty():
             try:
                 self._output_queue.get_nowait()

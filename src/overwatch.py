@@ -27,7 +27,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from .config.models import DetectionMode, get_default_mode
+from .config.models import DetectionMode
 from .config.defaults import DEFAULT_CONFIG
 from .utils.frame_encoder import calculate_frame_interval
 from .utils.args import parse_arguments, validate_arguments
@@ -312,11 +312,33 @@ class OverwatchOrchestrator:
         if self.communication:
             frame_stats = self.communication.get_frame_stream_stats()
             if frame_stats["enabled"]:
-                print(f"Frames streamed: {frame_stats['frames_published']} ({frame_stats.get('codec', 'unknown').upper()})")
+                codec = frame_stats.get('codec', 'unknown').upper()
+                print(f"Frames streamed: {frame_stats['frames_published']} ({codec})")
+                print(f"  Chunks published: {frame_stats.get('chunks_published', 0)}")
                 if "h264" in frame_stats:
                     h264 = frame_stats["h264"]
                     mb_encoded = h264.get("bytes_encoded", 0) / (1024 * 1024)
-                    print(f"  H.264 data: {mb_encoded:.2f} MB @ {h264.get('avg_bitrate_kbps', 0):.0f} kbps")
+                    print(f"  H.264 encoded: {mb_encoded:.2f} MB @ {h264.get('avg_bitrate_kbps', 0):.0f} kbps")
+                    print(f"  Encoder FPS: {h264.get('avg_fps', 0):.1f}")
+
+                # Video transmission format summary for backend verification
+                print(f"\n--- VIDEO TRANSMISSION FORMAT ---")
+                print(f"Subject: {frame_stats.get('video_subject')}")
+                if codec == "H264":
+                    print(f"Content-Type: video/mp2t")
+                    print(f"Container: MPEG-TS")
+                    print(f"Codec: H.264 (libx264)")
+                    print(f"Profile: baseline")
+                    print(f"Preset: ultrafast")
+                    print(f"Tune: zerolatency")
+                    print(f"Resolution: {h264.get('resolution', 'N/A')}")
+                    print(f"Chunk size: 1316 bytes (7 x 188 TS packets)")
+                    print(f"Headers: X-Frame-Type (IDR|P), X-Sequence, X-PTS")
+                else:
+                    print(f"Content-Type: image/jpeg")
+                    print(f"Format: JPEG frames")
+                    print(f"Headers: X-Sequence, Frame-Number")
+                print(f"---------------------------------")
 
         print("=" * 35)
     

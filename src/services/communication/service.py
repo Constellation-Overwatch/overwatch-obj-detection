@@ -9,7 +9,7 @@ from typing import Optional, Dict, Any
 
 from ...config.defaults import DEFAULT_CONFIG
 from ...utils.constellation import get_constellation_ids
-from ...utils.h264_encoder import H264Encoder
+from ...utils.h264_encoder import H264Encoder, EncodedChunk
 from .publisher import ConstellationPublisher
 
 class OverwatchCommunication:
@@ -93,6 +93,9 @@ class OverwatchCommunication:
             print(f"Configured video codec: {self._codec.upper()}")
             if self._codec == "h264":
                 print(f"  H.264: {self.frame_stream_config.get('h264_width')}x{self.frame_stream_config.get('h264_height')} @ {self.frame_stream_config.get('h264_bitrate')}")
+                print(f"  GOP: {self.frame_stream_config.get('h264_gop_size')} frames")
+            else:
+                print(f"  JPEG Quality: {self.frame_stream_config.get('jpeg_quality')}")
         print()
         
         # Connect to NATS
@@ -417,10 +420,17 @@ class OverwatchCommunication:
         detection_count: int = 0
     ) -> bool:
         """
-        Publish video frame to JetStream using configured codec.
+        Publish video frame to JetStream.
 
-        H.264/MPEG-TS (default): WebRTC-compatible, ~90% bandwidth savings
-        JPEG (fallback): Legacy format for compatibility
+        H.264/MPEG-TS mode (codec=h264):
+        - Each chunk is 1316 bytes (7 MPEG-TS packets, fits UDP datagram)
+        - Chunks published individually for real-time streaming
+        - Keyframe markers for seek/reconnection support
+        - ~90% bandwidth savings vs JPEG
+
+        JPEG mode (codec=jpeg):
+        - Simple JPEG frames for compatibility
+        - Higher bandwidth but simpler receiver
 
         Args:
             frame: BGR numpy array from OpenCV
@@ -437,49 +447,40 @@ class OverwatchCommunication:
         try:
             if self._codec == "h264" and self._h264_encoder:
                 # H.264/MPEG-TS encoding (WebRTC optimized)
-                encoded_bytes, metadata = self._h264_encoder.encode_frame(frame)
+                chunks, metadata = self._h264_encoder.encode_frame(frame)
 
-                if not encoded_bytes:
-                    return False  # No output ready yet (buffering)
+                if not chunks:
+                    return False  # No output ready (encoder buffering)
 
                 self._frame_count += 1
-                self._chunk_sequence += 1
 
-                # Detect keyframe (IDR) by checking for H.264 NAL unit type 5
-                # In MPEG-TS, keyframes typically have larger size due to I-frame data
-                is_keyframe = self._frame_count == 1 or (self._frame_count % self.frame_stream_config.get("h264_gop_size", 30)) == 1
-                frame_type = "IDR" if is_keyframe else "P"
+                # Publish each chunk individually for real-time streaming
+                for chunk in chunks:
+                    self._chunk_sequence += 1
 
-                headers = {
-                    "Content-Type": "video/mp2t",
-                    "Event-Type": "video_frame",
-                    "Codec": "h264",
-                    "Container": "mpegts",
-                    "X-Frame-Type": frame_type,
-                    "X-Sequence": str(self._chunk_sequence),
-                    "Frame-Number": str(frame_number),
-                    "Timestamp": timestamp,
-                    "Width": str(metadata.get("width", 0)),
-                    "Height": str(metadata.get("height", 0)),
-                    "Original-Width": str(metadata.get("original_width", 0)),
-                    "Original-Height": str(metadata.get("original_height", 0)),
-                    "Detection-Count": str(detection_count),
-                    "Device-ID": self.device_fingerprint['device_id'],
-                    "Org-ID": self.organization_id,
-                    "Entity-ID": self.entity_id,
-                    "Size-Bytes": str(len(encoded_bytes)),
-                    "Bitrate": str(metadata.get("bitrate", "1500k")),
-                }
+                    headers = {
+                        "Content-Type": "video/mp2t",
+                        "Codec": "h264",
+                        "X-Frame-Type": "IDR" if chunk.is_keyframe else "P",
+                        "X-Sequence": str(chunk.sequence),
+                        "X-PTS": str(chunk.pts),
+                        "Frame-Number": str(frame_number),
+                        "Timestamp": timestamp,
+                        "Width": str(metadata.get("width", 0)),
+                        "Height": str(metadata.get("height", 0)),
+                        "Detection-Count": str(detection_count),
+                        "Device-ID": self.device_fingerprint['device_id'],
+                        "Entity-ID": self.entity_id,
+                    }
 
-                await self.js.publish(
-                    self.video_subject,
-                    encoded_bytes,
-                    headers=headers
-                )
+                    await self.js.publish(
+                        self.video_subject,
+                        chunk.data,
+                        headers=headers
+                    )
             else:
-                # MPEG-TS JPEG (optimized)
+                # JPEG fallback (simpler, higher bandwidth)
                 import cv2
-                import subprocess
                 h, w = frame.shape[:2]
                 max_dim = self.frame_stream_config.get("max_dimension", 1280)
                 quality = self.frame_stream_config.get("jpeg_quality", 75)
@@ -487,66 +488,32 @@ class OverwatchCommunication:
                 # Scale if needed
                 if max(h, w) > max_dim:
                     scale = max_dim / max(h, w)
-                    frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
+                    frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+                    h, w = frame.shape[:2]
 
-                # Encode JPEG with OpenCV
-                _, jpeg_bytes = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
-                
-                # Wrap JPEG in MPEG-TS using FFmpeg
-                try:
-                    ffmpeg_cmd = [
-                        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                        "-f", "image2pipe", "-vcodec", "mjpeg", 
-                        "-r", str(self.frame_stream_config.get("target_fps", 15)),
-                        "-i", "-",
-                        "-c:v", "copy", 
-                        "-muxrate", "2000k",
-                        "-pat_period", "1", 
-                        "-sdt_period", "1",
-                        "-f", "mpegts", "-"
-                    ]
-                    
-                    result = subprocess.run(
-                        ffmpeg_cmd,
-                        input=jpeg_bytes.tobytes(),
-                        capture_output=True,
-                        timeout=1.0
-                    )
-                    
-                    if result.returncode == 0:
-                        mpegts_bytes = result.stdout
-                    else:
-                        # Fallback to raw JPEG
-                        mpegts_bytes = jpeg_bytes.tobytes()
-                        
-                except Exception:
-                    # Fallback to raw JPEG
-                    mpegts_bytes = jpeg_bytes.tobytes()
+                _, jpeg_buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+                jpeg_bytes = jpeg_buffer.tobytes()
 
                 self._frame_count += 1
+                self._chunk_sequence += 1
 
                 headers = {
-                    "Content-Type": "video/mp2t",
-                    "Event-Type": "video_frame", 
-                    "Codec": "mjpeg",
-                    "Container": "mpegts",
+                    "Content-Type": "image/jpeg",
+                    "Codec": "jpeg",
+                    "X-Sequence": str(self._chunk_sequence),
                     "Frame-Number": str(frame_number),
                     "Timestamp": timestamp,
-                    "Width": str(frame.shape[1]),
-                    "Height": str(frame.shape[0]),
-                    "Original-Width": str(w),
-                    "Original-Height": str(h),
+                    "Width": str(w),
+                    "Height": str(h),
                     "Detection-Count": str(detection_count),
                     "Device-ID": self.device_fingerprint['device_id'],
-                    "Org-ID": self.organization_id,
                     "Entity-ID": self.entity_id,
-                    "Size-Bytes": str(len(mpegts_bytes)),
-                    "Quality": str(quality),
+                    "Size-Bytes": str(len(jpeg_bytes)),
                 }
 
                 await self.js.publish(
                     self.video_subject,
-                    mpegts_bytes,
+                    jpeg_bytes,
                     headers=headers
                 )
 
@@ -562,6 +529,7 @@ class OverwatchCommunication:
             "enabled": self.frame_stream_enabled,
             "codec": self._codec,
             "frames_published": self._frame_count,
+            "chunks_published": self._chunk_sequence,
             "video_subject": self.video_subject,
             "target_fps": self.frame_stream_config.get("target_fps", 15),
         }
@@ -570,9 +538,13 @@ class OverwatchCommunication:
         if self._h264_encoder:
             encoder_stats = self._h264_encoder.get_stats()
             stats["h264"] = {
+                "frames_encoded": encoder_stats.get("frames_encoded", 0),
+                "chunks_produced": encoder_stats.get("chunks_produced", 0),
                 "bytes_encoded": encoder_stats.get("bytes_encoded", 0),
+                "avg_fps": encoder_stats.get("avg_fps", 0),
                 "avg_bitrate_kbps": round(encoder_stats.get("avg_bitrate_kbps", 0), 1),
                 "resolution": encoder_stats.get("resolution", ""),
+                "queue_size": encoder_stats.get("queue_size", 0),
             }
 
         return stats
